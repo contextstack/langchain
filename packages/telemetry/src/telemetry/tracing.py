@@ -120,8 +120,11 @@ def configure_tracer_provider(
             BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, headers=headers))
         )
     elif cfg.telemetry_backend == "langsmith":
-        os.environ["LANGSMITH_TRACING"] = "true"
-        os.environ["LANGSMITH_OTEL_ENABLED"] = "true"
+        # Keep LANGSMITH_TRACING=false so LangChain's CallbackManager does NOT
+        # auto-install a second, unmasked default LangChainTracer alongside our
+        # PII-redacting LangChainTracer from build_langchain_callbacks().
+        os.environ["LANGSMITH_TRACING"] = "false"
+        os.environ["LANGSMITH_OTEL_ENABLED"] = "false"
         os.environ["LANGSMITH_OTEL_ONLY"] = "false"
 
     trace.set_tracer_provider(provider)

@@ -106,38 +106,53 @@ class RunWorker:
         attempt: int,
         operation_id: str,
         release_version: str,
-    ) -> tuple[str, str, dict[str, Any]]:
+    ) -> tuple[str, str, str | None, dict[str, Any]]:
         """Reconcile an in-flight MCP write before settling a cancelled/expired run."""
-        if self.settings.mcp_transport == "http":
-            tok = mint_mcp_token(
-                tenant_id=tenant_id,
-                requester_id=requester_id,
-                run_id=run_id,
-                operation_id=operation_id,
-                secret=self.settings.mcp_token_secret,
-            )
-            rec = await call_mcp_tool(
-                url=self.settings.mcp_infra_url,
-                bearer_token=tok,
-                tool_name="get_operation_status",
-                arguments={"operation_id": operation_id},
-            )
-        else:
-            rec = await domain.get_operation_status(
-                tenant_id=tenant_id, operation_id=operation_id
-            )
-        if rec["status"] == "succeeded":
+        try:
+            if self.settings.mcp_transport == "http":
+                tok = mint_mcp_token(
+                    tenant_id=tenant_id,
+                    requester_id=requester_id,
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    secret=self.settings.mcp_token_secret,
+                )
+                rec = await asyncio.wait_for(
+                    call_mcp_tool(
+                        url=self.settings.mcp_infra_url,
+                        bearer_token=tok,
+                        tool_name="get_operation_status",
+                        arguments={"operation_id": operation_id},
+                    ),
+                    timeout=self.settings.tool_timeout_s,
+                )
+            else:
+                rec = await asyncio.wait_for(
+                    domain.get_operation_status(tenant_id=tenant_id, operation_id=operation_id),
+                    timeout=self.settings.tool_timeout_s,
+                )
+        except Exception as exc:
+            rec = {
+                "operation_id": operation_id,
+                "status": "outcome_unknown",
+                "error": str(exc),
+            }
+
+        if rec.get("status") == "succeeded":
             decision = "succeeded"
             run_status = "succeeded"
             thread_status = "completed"
-        elif rec["status"] == "failed":
+            err_cat: str | None = None
+        elif rec.get("status") == "failed":
             decision = "failed"
             run_status = "failed"
             thread_status = "failed"
+            err_cat = "fatal"
         else:
             decision = "outcome_unknown"
             run_status = "failed"
             thread_status = "failed"
+            err_cat = "outcome_unknown"
 
         await write_audit_event(
             conn,
@@ -157,7 +172,7 @@ class RunWorker:
                 details=rec,
             ),
         )
-        return run_status, thread_status, rec
+        return run_status, thread_status, err_cat, rec
 
     async def _sweep_expired_runs(
         self,
@@ -235,7 +250,7 @@ class RunWorker:
                     snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
                     op_id = (snap.values or {}).get("operation_id") if snap else None
                     if op_id:
-                        r_status, t_status, rec = await self._reconcile_in_flight_write(
+                        r_status, t_status, err_cat, rec = await self._reconcile_in_flight_write(
                             conn=conn,
                             domain=domain,
                             tenant_id=tenant_id,
@@ -248,18 +263,24 @@ class RunWorker:
                         )
                         detail = json.dumps({"reconciled": rec})
                     else:
-                        r_status, t_status, detail = "cancelled", "cancelled", "cancelled_expired"
+                        r_status, t_status, err_cat, detail = (
+                            "cancelled",
+                            "cancelled",
+                            None,
+                            "cancelled_expired",
+                        )
 
                     await cur.execute(
                         """
                         UPDATE runs
                            SET status = %s,
+                               error_category = %s,
                                error_detail = %s,
                                lease_owner = NULL,
                                updated_at = now()
                          WHERE run_id = %s
                         """,
-                        (r_status, detail, run_id),
+                        (r_status, err_cat, detail, run_id),
                     )
                     await cur.execute(
                         "UPDATE app_threads SET status = %s, updated_at = now() "
@@ -636,7 +657,7 @@ class RunWorker:
             op_id = (post_snap.values or {}).get("operation_id") if post_snap else None
             if op_id:
                 async with pool.connection() as conn:
-                    r_st, t_st, rec = await self._reconcile_in_flight_write(
+                    r_st, t_st, err_cat, rec = await self._reconcile_in_flight_write(
                         conn=conn,
                         domain=domain,
                         tenant_id=tenant_id,
@@ -655,6 +676,7 @@ class RunWorker:
                     attempt=attempt,
                     run_status=r_st,
                     thread_status=t_st,
+                    error_category=err_cat,
                     error_detail=json.dumps({"reconciled": rec}),
                 )
                 if committed:
