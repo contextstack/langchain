@@ -73,7 +73,7 @@ services:
       retries: 10
 
   langfuse-clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:26.3.62.3
     profiles: ["full"]
     environment:
       CLICKHOUSE_DB: default
@@ -82,13 +82,13 @@ services:
     volumes:
       - langfuse_ch_data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   langfuse-minio:
-    image: minio/minio:latest
+    image: cgr.dev/chainguard/minio
     profiles: ["full"]
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
@@ -99,7 +99,7 @@ services:
       - langfuse_minio_data:/data
 
   langfuse-worker:
-    image: docker.io/langfuse/langfuse-worker:3
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
     profiles: ["full"]
     depends_on:
       langfuse-postgres:
@@ -113,7 +113,7 @@ services:
     environment: &langfuse-env
       DATABASE_URL: postgresql://langfuse:langfuse_dev_password@langfuse-postgres:5432/langfuse
       SALT: dev-only-langfuse-salt-change-me
-      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
@@ -131,7 +131,7 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
 
   langfuse-web:
-    image: docker.io/langfuse/langfuse:3
+    image: docker.langfuse.com/langfuse/langfuse:4
     profiles: ["full"]
     depends_on:
       langfuse-postgres:
