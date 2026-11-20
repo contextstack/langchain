@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ContextStack Enterprise LangChain — IT/Ops Desk</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --border: #334155;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --bad: #ef4444;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        padding: 20px;
+      }
+      h1, h2, h3 { margin: 0 0 12px 0; }
+      .bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      textarea, input, select {
+        background: #0b1220;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 14px;
+      }
+      textarea { width: 100%; box-sizing: border-box; min-height: 70px; }
+      button {
+        background: var(--accent);
+        color: #082f49;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary { background: #334155; color: var(--text); }
+      button.danger { background: var(--bad); color: white; }
+      button.ok { background: var(--ok); color: #052e16; }
+      .log {
+        background: #020617;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 12px;
+        min-height: 180px;
+        max-height: 360px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+      }
+      .approval-item {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+        margin-bottom: 12px;
+        background: #0b1220;
+      }
+      .muted { color: var(--muted); font-size: 13px; }
+      a { color: var(--accent); }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        background: #334155;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ContextStack IT/Ops Change-Request &amp; Incident Desk</h1>
+
+    <div class="bar">
+      <label for="persona"><strong>Persona / Tenant:</strong></label>
+      <select id="persona">
+        <option value="alice">alice@tenant-alpha [engineer]</option>
+        <option value="bob">bob@tenant-alpha [ops-approver]</option>
+        <option value="carol">carol@tenant-beta [engineer]</option>
+        <option value="dana">dana@tenant-alpha [engineer, ops-approver — self-approval test]</option>
+      </select>
+      <span id="identityBadge" class="pill">loading...</span>
+      <a id="langfuseLink" href="http://localhost:3000" target="_blank" rel="noreferrer">Open Langfuse UI</a>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>1. Incident Console</h2>
+        <p class="muted">Creates a tenant-scoped thread, enqueues a run, and streams SSE via authenticated <code>fetch()</code>.</p>
+        <textarea id="requestText">checkout-api is returning 502s after v2.4.1 deploy</textarea>
+        <div class="row">
+          <button id="submitBtn">Submit Incident</button>
+          <button id="cancelBtn" class="secondary">Cancel Active Run</button>
+        </div>
+        <h3 style="margin-top: 16px;">Live Execution Stream</h3>
+        <div id="streamLog" class="log"></div>
+      </section>
+
+      <section class="card">
+        <h2>2. HITL Approval Inbox</h2>
+        <p class="muted">Visible only to <code>ops-approver</code> in the same tenant, and only once the thread is durably <code>awaiting_approval</code>.</p>
+        <div class="row" style="margin-bottom: 12px;">
+          <button id="refreshApprovalsBtn" class="secondary">Refresh Inbox</button>
+        </div>
+        <div id="approvalList"></div>
+      </section>
+    </div>
+
+    <script>
+      let authToken = "";
+      let activeRunId = null;
+
+      function log(line) {
+        const el = document.getElementById("streamLog");
+        el.textContent += `[${new Date().toLocaleTimeString()}] ${line}\n`;
+        el.scrollTop = el.scrollHeight;
+      }
+
+      async function apiFetch(path, opts = {}) {
+        const headers = Object.assign(
+          { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+          opts.headers || {}
+        );
+        return fetch(path, Object.assign({}, opts, { headers }));
+      }
+
+      async function switchPersona(persona) {
+        const res = await fetch("/v1/dev/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ persona }),
+        });
+        const data = await res.json();
+        authToken = data.token;
+        document.getElementById("identityBadge").textContent =
+          `${data.actor_id} @ ${data.tenant_id} (${data.roles.join(", ")})`;
+        if (data.langfuse_url) {
+          document.getElementById("langfuseLink").href = data.langfuse_url;
+        }
+        await refreshApprovals();
+      }
+
+      // Authenticated SSE streaming via fetch() + ReadableStream (supports Bearer auth + Last-Event-ID)
+      async function streamRun(runId, lastEventId = null) {
+        activeRunId = runId;
+        const headers = { Authorization: `Bearer ${authToken}` };
+        if (lastEventId) headers["Last-Event-ID"] = lastEventId;
+
+        const res = await fetch(`/v1/runs/${runId}/stream`, { headers });
+        if (!res.ok || !res.body) {
+          log(`Stream error: HTTP ${res.status}`);
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let currentEvent = "message";
+        let currentId = lastEventId;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() || "";
+
+          for (const frame of frames) {
+            let dataStr = "";
+            for (const line of frame.split("\n")) {
+              if (line.startsWith("id: ")) currentId = line.slice(4).trim();
+              else if (line.startsWith("event: ")) currentEvent = line.slice(7).trim();
+              else if (line.startsWith("data: ")) dataStr += line.slice(6);
+            }
+            log(`${currentEvent} (id=${currentId || "-"}): ${dataStr}`);
+            if (currentEvent === "interrupt") {
+              await refreshApprovals();
+            }
+          }
+        }
+      }
+
+      async function submitIncident() {
+        const text = document.getElementById("requestText").value.trim();
+        if (!text) return;
+        const tRes = await apiFetch("/v1/threads", {
+          method: "POST",
+          body: JSON.stringify({ workflow_name: "incident_desk" }),
+        });
+        const thread = await tRes.json();
+        if (!tRes.ok) { log(`Create thread failed: ${JSON.stringify(thread)}`); return; }
+        log(`Created thread ${thread.thread_id}`);
+
+        const rRes = await apiFetch(`/v1/threads/${thread.thread_id}/runs`, {
+          method: "POST",
+          body: JSON.stringify({ request_text: text }),
+        });
+        const run = await rRes.json();
+        if (!rRes.ok) { log(`Start run failed: ${JSON.stringify(run)}`); return; }
+        log(`Started run ${run.run_id}`);
+        await streamRun(run.run_id);
+      }
+
+      async function cancelActiveRun() {
+        if (!activeRunId) return;
+        const res = await apiFetch(`/v1/runs/${activeRunId}/cancel`, { method: "POST" });
+        log(`Cancel response (${res.status}): ${await res.text()}`);
+      }
+
+      async function decide(approvalId, decision, edits = null) {
+        const body = { decision, comment: `Decided via Demo UI (${decision})` };
+        if (edits) body.edits = edits;
+        const res = await apiFetch(`/v1/approvals/${approvalId}/decision`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          log(`Decision refused (${res.status}): ${JSON.stringify(data)}`);
+          return;
+        }
+        log(`Decision '${decision}' accepted -> resume run ${data.run_id}`);
+        await refreshApprovals();
+        await streamRun(data.run_id);
+      }
+
+      async function refreshApprovals() {
+        const container = document.getElementById("approvalList");
+        const res = await apiFetch("/v1/approvals");
+        if (res.status === 403) {
+          container.innerHTML = `<p class="muted">Switch to an <code>ops-approver</code> persona (e.g. bob) to view the inbox.</p>`;
+          return;
+        }
+        const items = await res.json();
+        if (!items.length) {
+          container.innerHTML = `<p class="muted">No pending approvals.</p>`;
+          return;
+        }
+        container.innerHTML = "";
+        for (const item of items) {
+          const div = document.createElement("div");
+          div.className = "approval-item";
+          const cites = (item.plan.citations || [])
+            .map((c) => `<li><code>${c.doc_id}</code> — ${c.title}</li>`)
+            .join("");
+          div.innerHTML = `
+            <div><strong>${item.approval_id}</strong> <span class="pill">by ${item.requested_by}</span></div>
+            <div class="muted" style="margin:6px 0;">
+              Action: <strong>${item.plan.action}</strong> on <code>${item.plan.target_resource}</code>
+              (risk: ${item.plan.risk_level})
+            </div>
+            <div>${item.plan.summary || ""}</div>
+            <div class="muted" style="margin-top:6px;">Cited Runbooks:<ul>${cites || "<li>none</li>"}</ul></div>
+            <div class="row">
+              <button class="ok" data-act="approve">Approve</button>
+              <button class="secondary" data-act="edit">Edit → Restart</button>
+              <button class="danger" data-act="reject">Reject</button>
+            </div>
+          `;
+          div.querySelector('[data-act="approve"]').onclick = () => decide(item.approval_id, "approve");
+          div.querySelector('[data-act="edit"]').onclick = () =>
+            decide(item.approval_id, "edit", { action: "restart", target_version: null });
+          div.querySelector('[data-act="reject"]').onclick = () => decide(item.approval_id, "reject");
+          container.appendChild(div);
+        }
+      }
+
+      document.getElementById("persona").addEventListener("change", (e) => switchPersona(e.target.value));
+      document.getElementById("submitBtn").addEventListener("click", submitIncident);
+      document.getElementById("cancelBtn").addEventListener("click", cancelActiveRun);
+      document.getElementById("refreshApprovalsBtn").addEventListener("click", refreshApprovals);
+
+      switchPersona("alice");
+    </script>
+  </body>
+</html>
