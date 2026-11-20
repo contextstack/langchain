@@ -133,22 +133,24 @@ def test_m0_04_langchain_v1_middleware_imports() -> None:
 # Checklist #6: Studio graph compiles without checkpointer
 # ---------------------------------------------------------------------------
 async def test_m0_06_studio_graph_compiles_without_checkpointer() -> None:
-    from core.models import RunContext  # noqa: PLC0415
-
     graph = build_studio_graph()
     assert graph.checkpointer is None
-    out = await graph.ainvoke(
-        {"request_text": "status only check"},
-        context=RunContext(
-            tenant_id="tenant-alpha",
-            requester_id="alice",
-            requester_roles=frozenset({"engineer"}),
-            thread_id="studio-t1",
-            run_id="studio-r1",
-            request_id="studio-req1",
-        ),
-    )
+    # Default Studio invocation without passing context= uses StudioRunContext defaults
+    out = await graph.ainvoke({"request_text": "status only check"})
     assert out["final_status"] == "no_action"
+
+
+def test_gateway_chat_model_supports_bind_tools_and_structured_output() -> None:
+    from core.config import Settings  # noqa: PLC0415
+    from gateway.factory import get_chat_model  # noqa: PLC0415
+
+    model = get_chat_model(
+        alias="ops-primary",
+        tenant_id="tenant-alpha",
+        settings=Settings(model_mode="gateway"),
+    )
+    assert callable(getattr(model, "bind_tools", None))
+    assert callable(getattr(model, "with_structured_output", None))
 
 
 # ---------------------------------------------------------------------------

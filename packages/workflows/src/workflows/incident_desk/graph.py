@@ -26,7 +26,7 @@ from core.audit import AuditEvent, write_audit_event
 from core.auth import mint_mcp_token
 from core.config import Settings, get_settings
 from core.models import ChangePlan, RunbookCitation, RunContext
-from core.pii import API_KEY_PATTERN, EMAIL_PATTERN, PHONE_PATTERN
+from core.pii import API_KEY_PATTERN, EMAIL_PATTERN, PHONE_PATTERN, redact_obj, redact_text
 from core.policy import PolicyDecision, PolicyEngine
 from core.tool_contract import TOOL_CONTRACTS, cap_tool_output
 from gateway.factory import get_chat_model, get_embeddings
@@ -145,15 +145,35 @@ class WorkflowDeps:
         return self.domain_store
 
 
+class StudioRunContext(RunContext, frozen=True):
+    """Dev fixture defaults so `langgraph dev` Studio works with an empty context payload."""
+
+    tenant_id: str = "tenant-alpha"
+    requester_id: str = "alice"
+    requester_roles: frozenset[str] = frozenset({"engineer"})
+    thread_id: str = "studio-thread"
+    run_id: str = "studio-run"
+    request_id: str = "studio-req"
+
+
 def build_incident_desk_graph(
     *,
     deps: WorkflowDeps | None = None,
     checkpointer: Any = None,
     store: Any = None,
+    context_schema: type[RunContext] = RunContext,
+    default_context: RunContext | None = None,
 ):
     """Compile the full IT/Ops Desk StateGraph with context_schema=RunContext."""
     wf_deps = deps or WorkflowDeps()
     domain = wf_deps.get_domain_store()
+
+    def _ctx(runtime: Runtime[RunContext]) -> RunContext:
+        if runtime.context is not None:
+            return runtime.context
+        if default_context is not None:
+            return default_context
+        raise ValueError("Missing required RunContext")
 
     # ------------------------------------------------------------------
     # Read-only tools for the bounded `investigate` create_agent node
@@ -216,7 +236,7 @@ def build_incident_desk_graph(
     async def retrieve_context(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         query = state.get("request_text", "")
         if wf_deps.use_postgres:
             embeddings = get_embeddings(settings=wf_deps.settings)
@@ -258,7 +278,7 @@ def build_incident_desk_graph(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
         _maybe_inject_fault("investigate")
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         req_text = state.get("request_text", "")
 
         if wf_deps.settings.model_mode == "mock":
@@ -342,7 +362,7 @@ def build_incident_desk_graph(
     async def propose_plan(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         runbooks = state.get("retrieved_runbooks", [])
         req_text = state.get("request_text", "")
 
@@ -353,10 +373,13 @@ def build_incident_desk_graph(
                 alias="ops-primary", tenant_id=ctx.tenant_id, settings=wf_deps.settings
             )
             structured = model.with_structured_output(ChangePlan)
+            safe_req = redact_text(req_text)
+            safe_summary = redact_text(state.get("investigation_summary", ""))
+            safe_runbooks = redact_obj(runbooks)
             plan = await structured.ainvoke(
-                f"Request: {req_text}\n"
-                f"Investigation: {state.get('investigation_summary', '')}\n"
-                f"Runbooks: {json.dumps(runbooks)}"
+                f"Request: {safe_req}\n"
+                f"Investigation: {safe_summary}\n"
+                f"Runbooks: {json.dumps(safe_runbooks)}"
             )
 
         return {"change_plan": plan.model_dump(mode="json")}
@@ -373,7 +396,7 @@ def build_incident_desk_graph(
     async def evaluate_policy(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         plan = _coerce_plan(state.get("change_plan"))
         assert plan is not None
 
@@ -421,7 +444,7 @@ def build_incident_desk_graph(
     async def record_approval_request(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         plan = _coerce_plan(state.get("change_plan"))
         operation_id = state.get("operation_id")
         assert plan is not None and operation_id is not None
@@ -517,7 +540,7 @@ def build_incident_desk_graph(
     async def revalidate_edit(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         plan = _coerce_plan(state.get("change_plan"))
         decision = state.get("approval_decision") or {}
         edits = decision.get("edits") or {}
@@ -569,7 +592,7 @@ def build_incident_desk_graph(
     async def execute_change(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         plan = _coerce_plan(state.get("change_plan"))
         operation_id = state.get("operation_id")
         approved_hash = state.get("approved_plan_hash")
@@ -724,7 +747,7 @@ def build_incident_desk_graph(
     async def verify_end_state(
         state: IncidentDeskState, runtime: Runtime[RunContext]
     ) -> dict[str, Any]:
-        ctx = runtime.context
+        ctx = _ctx(runtime)
         plan = _coerce_plan(state.get("change_plan"))
         assert plan is not None
 
@@ -762,7 +785,7 @@ def build_incident_desk_graph(
     # ------------------------------------------------------------------
     # Assemble StateGraph
     # ------------------------------------------------------------------
-    builder = StateGraph(IncidentDeskState, context_schema=RunContext)
+    builder = StateGraph(IncidentDeskState, context_schema=context_schema)
     builder.add_node("retrieve_context", retrieve_context)
     builder.add_node("investigate", investigate)
     builder.add_node("propose_plan", propose_plan)
@@ -822,4 +845,9 @@ def build_incident_desk_graph(
 
 def build_studio_graph():
     """Compiled WITHOUT a checkpointer so `langgraph dev` supplies local persistence (spec §5.7)."""
-    return build_incident_desk_graph(deps=WorkflowDeps(use_postgres=False), checkpointer=None)
+    return build_incident_desk_graph(
+        deps=WorkflowDeps(use_postgres=False),
+        checkpointer=None,
+        context_schema=StudioRunContext,
+        default_context=StudioRunContext(),
+    )

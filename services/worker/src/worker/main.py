@@ -435,7 +435,7 @@ class RunWorker:
                     ),
                 )
                 await conn.commit()
-            await self._fenced_finalize(
+            committed = await self._fenced_finalize(
                 pool,
                 run_id=run_id,
                 thread_id=thread_id,
@@ -445,7 +445,8 @@ class RunWorker:
                 error_category="fatal",
                 error_detail="migration_required",
             )
-            await self._publish_event(rds, run_id, "error", {"error": "migration_required"})
+            if committed:
+                await self._publish_event(rds, run_id, "error", {"error": "migration_required"})
             return
 
         domain = PostgresDomainStore(self.settings.database_url)
@@ -485,7 +486,7 @@ class RunWorker:
 
                 # Decide continuation path (spec §8.2)
                 if has_interrupts and kind == "start":
-                    await self._fenced_finalize(
+                    committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,
                         thread_id=thread_id,
@@ -493,14 +494,15 @@ class RunWorker:
                         run_status="awaiting_approval",
                         thread_status="awaiting_approval",
                     )
-                    await self._publish_event(
-                        rds, run_id, "interrupt", snap.interrupts[0].value
-                    )
+                    if committed:
+                        await self._publish_event(
+                            rds, run_id, "interrupt", snap.interrupts[0].value
+                        )
                     return
 
                 if not has_next and has_values and not has_interrupts:
                     final_st = snap.values.get("final_status", "completed")
-                    await self._fenced_finalize(
+                    committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,
                         thread_id=thread_id,
@@ -508,7 +510,8 @@ class RunWorker:
                         run_status="succeeded",
                         thread_status="completed" if final_st == "completed" else final_st,
                     )
-                    await self._publish_event(rds, run_id, "done", {"status": final_st})
+                    if committed:
+                        await self._publish_event(rds, run_id, "done", {"status": final_st})
                     return
 
                 graph_input: Any
@@ -543,7 +546,7 @@ class RunWorker:
 
                 end_snap = await graph.aget_state(config)
                 if end_snap and end_snap.interrupts:
-                    await self._fenced_finalize(
+                    committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,
                         thread_id=thread_id,
@@ -551,16 +554,20 @@ class RunWorker:
                         run_status="awaiting_approval",
                         thread_status="awaiting_approval",
                     )
-                    await self._publish_event(
-                        rds, run_id, "interrupt", end_snap.interrupts[0].value
-                    )
+                    if committed:
+                        await self._publish_event(
+                            rds, run_id, "interrupt", end_snap.interrupts[0].value
+                        )
                 else:
                     vals = end_snap.values if end_snap else {}
                     final_st = vals.get("final_status", "completed")
                     err_cat = vals.get("error_category")
-                    run_st = "failed" if err_cat in {"fatal", "outcome_unknown"} else "succeeded"
+                    failed_outcome = err_cat in {"fatal", "outcome_unknown"} or (
+                        final_st in {"denied_plan_mismatch", "verification_failed"}
+                    )
+                    run_st = "failed" if failed_outcome else "succeeded"
                     thread_st = "failed" if run_st == "failed" else "completed"
-                    await self._fenced_finalize(
+                    committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,
                         thread_id=thread_id,
@@ -570,17 +577,18 @@ class RunWorker:
                         error_category=err_cat,
                         error_detail=final_st,
                     )
-                    await self._publish_event(
-                        rds,
-                        run_id,
-                        "done",
-                        {
-                            "status": run_st,
-                            "final_status": final_st,
-                            "verification_passed": vals.get("verification_passed"),
-                            "operation_id": vals.get("operation_id"),
-                        },
-                    )
+                    if committed:
+                        await self._publish_event(
+                            rds,
+                            run_id,
+                            "done",
+                            {
+                                "status": run_st,
+                                "final_status": final_st,
+                                "verification_passed": vals.get("verification_passed"),
+                                "operation_id": vals.get("operation_id"),
+                            },
+                        )
         except asyncio.CancelledError:
             # Cancel-after-write reconciliation (AC-16)
             post_snap = await graph.aget_state(config)
@@ -599,7 +607,7 @@ class RunWorker:
                         release_version=claimed["release_version"],
                     )
                     await conn.commit()
-                await self._fenced_finalize(
+                committed = await self._fenced_finalize(
                     pool,
                     run_id=run_id,
                     thread_id=thread_id,
@@ -608,9 +616,12 @@ class RunWorker:
                     thread_status=t_st,
                     error_detail=json.dumps({"reconciled": rec}),
                 )
-                await self._publish_event(rds, run_id, "done", {"status": r_st, "reconciled": rec})
+                if committed:
+                    await self._publish_event(
+                        rds, run_id, "done", {"status": r_st, "reconciled": rec}
+                    )
             else:
-                await self._fenced_finalize(
+                committed = await self._fenced_finalize(
                     pool,
                     run_id=run_id,
                     thread_id=thread_id,
@@ -618,9 +629,10 @@ class RunWorker:
                     run_status="cancelled",
                     thread_status="cancelled",
                 )
-                await self._publish_event(rds, run_id, "done", {"status": "cancelled"})
+                if committed:
+                    await self._publish_event(rds, run_id, "done", {"status": "cancelled"})
         except TimeoutError:
-            await self._fenced_finalize(
+            committed = await self._fenced_finalize(
                 pool,
                 run_id=run_id,
                 thread_id=thread_id,
@@ -630,9 +642,10 @@ class RunWorker:
                 error_category="transient",
                 error_detail="run_timeout",
             )
-            await self._publish_event(rds, run_id, "error", {"error": "run_timeout"})
+            if committed:
+                await self._publish_event(rds, run_id, "error", {"error": "run_timeout"})
         except Exception as exc:
-            await self._fenced_finalize(
+            committed = await self._fenced_finalize(
                 pool,
                 run_id=run_id,
                 thread_id=thread_id,
@@ -642,7 +655,8 @@ class RunWorker:
                 error_category="fatal",
                 error_detail=str(exc),
             )
-            await self._publish_event(rds, run_id, "error", {"error": str(exc)})
+            if committed:
+                await self._publish_event(rds, run_id, "error", {"error": str(exc)})
         finally:
             hb_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

@@ -392,16 +392,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT tenant_id, thread_id, status FROM runs WHERE run_id = %s FOR UPDATE",
+                "SELECT tenant_id, thread_id, status, kind FROM runs WHERE run_id = %s FOR UPDATE",
                 (run_id,),
             )
             row = await cur.fetchone()
             if row is None or row[0] != caller.tenant_id:
                 raise HTTPException(status_code=404, detail="Run not found")
 
-            thread_id = row[1]
+            thread_id, run_status, run_kind = row[1], row[2], row[3]
 
-            # Atomic cancel-before-claim (AC-14)
+            # Atomic cancel-before-claim (AC-14).
+            # Only a cancelled queued `start` run returns its thread to `idle`;
+            # a cancelled queued `resume` run leaves the thread `cancelled` because
+            # its approval was already decided.
             await cur.execute(
                 """
                 UPDATE runs
@@ -411,15 +414,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (run_id,),
             )
             if cur.rowcount == 1:
+                next_thread_status = "idle" if run_kind == "start" else "cancelled"
                 await cur.execute(
-                    "UPDATE app_threads SET status = 'idle', updated_at = now() "
+                    "UPDATE app_threads SET status = %s, updated_at = now() "
                     "WHERE thread_id = %s",
-                    (thread_id,),
+                    (next_thread_status, thread_id),
                 )
                 await conn.commit()
-                return {"run_id": run_id, "status": "cancelled", "cancelled_before_claim": True}
+                return {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "thread_status": next_thread_status,
+                    "cancelled_before_claim": True,
+                }
 
-            if row[2] == "running":
+            if run_status == "running":
                 await cur.execute(
                     "UPDATE runs SET cancel_requested = true, updated_at = now() "
                     "WHERE run_id = %s",
@@ -430,7 +439,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return {"run_id": run_id, "status": "running", "cancel_requested": True}
 
             await conn.commit()
-            return {"run_id": run_id, "status": row[2], "cancel_requested": False}
+            return {"run_id": run_id, "status": run_status, "cancel_requested": False}
 
     # ------------------------------------------------------------------
     # Approvals (Actionable Inbox + Single-Decision Guarantee)

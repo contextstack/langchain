@@ -522,6 +522,56 @@ async def test_ac14_cancel_before_claim() -> None:
         assert r2.status_code == 202
 
 
+async def test_cancel_queued_resume_does_not_reset_thread_to_idle() -> None:
+    """Cancelling a queued resume run marks the thread `cancelled`, NOT `idle`."""
+    await _reset_db()
+    app = create_app()
+    alice = _token_for("alice", "tenant-alpha", {"engineer"})
+    bob = _token_for("bob", "tenant-alpha", {"ops-approver"})
+
+    w = _spawn_worker()
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client,
+        ):
+            t_id = (await client.post("/v1/threads", json={}, headers=alice)).json()["thread_id"]
+            r_id = (
+                await client.post(
+                    f"/v1/threads/{t_id}/runs",
+                    json={"request_text": "checkout-api returning 502s"},
+                    headers=alice,
+                )
+            ).json()["run_id"]
+            await _wait_for_run_status(client, r_id, alice, {"awaiting_approval"})
+            apr_id = (await client.get("/v1/approvals", headers=bob)).json()[0]["approval_id"]
+            _stop_proc(w)
+
+            # Approve while no worker is running -> resume run stays queued
+            dec = await client.post(
+                f"/v1/approvals/{apr_id}/decision",
+                json={"decision": "approve"},
+                headers=bob,
+            )
+            resume_run_id = dec.json()["run_id"]
+
+            cancel = await client.post(f"/v1/runs/{resume_run_id}/cancel", headers=alice)
+            assert cancel.status_code == 200
+            assert cancel.json()["thread_status"] == "cancelled"
+
+            # Thread must NOT accept a new start run
+            dup = await client.post(
+                f"/v1/threads/{t_id}/runs",
+                json={"request_text": "should be rejected"},
+                headers=alice,
+            )
+            assert dup.status_code == 409
+    finally:
+        _stop_proc(w)
+
+
 # ---------------------------------------------------------------------------
 # AC-16: Cancel after downstream commit -> reconciles instead of hiding commit
 # ---------------------------------------------------------------------------

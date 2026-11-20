@@ -38,6 +38,8 @@ def get_chat_model(
         check_every_n_seconds=0.1,
         max_bucket_size=10,
     )
+    # Use native max_retries on the ChatModel rather than .with_retry() (RunnableRetry),
+    # so .bind_tools() and .with_structured_output() remain available.
     model: BaseChatModel = init_chat_model(
         model=alias,
         model_provider="openai",
@@ -45,8 +47,9 @@ def get_chat_model(
         api_key=_tenant_litellm_key(tenant_id, cfg),
         rate_limiter=rate_limiter,
         temperature=0.0,
+        max_retries=3,
     )
-    return model.with_retry(stop_after_attempt=3, wait_exponential_jitter=True)
+    return model
 
 
 def get_embeddings(*, settings: Settings | None = None) -> Embeddings:
