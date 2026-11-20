@@ -32,13 +32,10 @@ from core.tool_contract import TOOL_CONTRACTS, cap_tool_output
 from gateway.factory import get_chat_model, get_embeddings
 from knowledge.fixtures import SEED_RUNBOOKS
 from knowledge.retriever import retrieve_runbooks
-from mcp_servers.domain_store import (
-    InMemoryDomainStore,
-    PostgresDomainStore,
-    ResourceNotFoundError,
-)
+from mcp_servers.domain_store import InMemoryDomainStore, PostgresDomainStore
 from workflows.incident_desk.state import IncidentDeskState
 from workflows.incident_desk.version import RELEASE_VERSION
+from workflows.mcp_client import call_mcp_tool
 
 
 def _maybe_inject_fault(point: str) -> None:
@@ -131,6 +128,7 @@ class WorkflowDeps:
     domain_store: PostgresDomainStore | InMemoryDomainStore | None = None
     policy: PolicyEngine = field(default_factory=PolicyEngine)
     use_postgres: bool = False
+    use_mcp_http: bool = False
     approvals_memory: dict[str, dict[str, Any]] = field(default_factory=dict)
     audit_memory: list[AuditEvent] = field(default_factory=list)
     attempt: int = 1
@@ -184,13 +182,27 @@ def build_incident_desk_graph(
         """Inspect current version and health of a service in the caller's tenant."""
         ctx = runtime.context
         try:
-            res = await domain.get_service_status(
-                tenant_id=ctx.tenant_id, service_name=service_name
-            )
+            if wf_deps.use_mcp_http:
+                tok = mint_mcp_token(
+                    tenant_id=ctx.tenant_id,
+                    requester_id=ctx.requester_id,
+                    run_id=ctx.run_id,
+                    secret=wf_deps.settings.mcp_token_secret,
+                )
+                res = await call_mcp_tool(
+                    url=wf_deps.settings.mcp_infra_url,
+                    bearer_token=tok,
+                    tool_name="get_service_status",
+                    arguments={"service_name": service_name},
+                )
+            else:
+                res = await domain.get_service_status(
+                    tenant_id=ctx.tenant_id, service_name=service_name
+                )
             return cap_tool_output(
                 json.dumps(res), TOOL_CONTRACTS["get_service_status"].max_output_chars
             )
-        except ResourceNotFoundError as exc:
+        except Exception as exc:
             return json.dumps({"error": str(exc)})
 
     @tool
@@ -198,13 +210,27 @@ def build_incident_desk_graph(
         """List recent deploys for a service in the caller's tenant."""
         ctx = runtime.context
         try:
-            res = await domain.list_recent_deploys(
-                tenant_id=ctx.tenant_id, service_name=service_name
-            )
+            if wf_deps.use_mcp_http:
+                tok = mint_mcp_token(
+                    tenant_id=ctx.tenant_id,
+                    requester_id=ctx.requester_id,
+                    run_id=ctx.run_id,
+                    secret=wf_deps.settings.mcp_token_secret,
+                )
+                res = await call_mcp_tool(
+                    url=wf_deps.settings.mcp_infra_url,
+                    bearer_token=tok,
+                    tool_name="list_recent_deploys",
+                    arguments={"service_name": service_name},
+                )
+            else:
+                res = await domain.list_recent_deploys(
+                    tenant_id=ctx.tenant_id, service_name=service_name
+                )
             return cap_tool_output(
                 json.dumps(res), TOOL_CONTRACTS["list_recent_deploys"].max_output_chars
             )
-        except ResourceNotFoundError as exc:
+        except Exception as exc:
             return json.dumps({"error": str(exc)})
 
     @tool
@@ -212,11 +238,25 @@ def build_incident_desk_graph(
         """Inspect an incident ticket belonging to the caller's tenant."""
         ctx = runtime.context
         try:
-            res = await domain.get_ticket(tenant_id=ctx.tenant_id, ticket_id=ticket_id)
+            if wf_deps.use_mcp_http:
+                tok = mint_mcp_token(
+                    tenant_id=ctx.tenant_id,
+                    requester_id=ctx.requester_id,
+                    run_id=ctx.run_id,
+                    secret=wf_deps.settings.mcp_token_secret,
+                )
+                res = await call_mcp_tool(
+                    url=wf_deps.settings.mcp_ticketing_url,
+                    bearer_token=tok,
+                    tool_name="get_ticket",
+                    arguments={"ticket_id": ticket_id},
+                )
+            else:
+                res = await domain.get_ticket(tenant_id=ctx.tenant_id, ticket_id=ticket_id)
             return cap_tool_output(
                 json.dumps(res), TOOL_CONTRACTS["get_ticket"].max_output_chars
             )
-        except ResourceNotFoundError as exc:
+        except Exception as exc:
             return json.dumps({"error": str(exc)})
 
     read_only_tools = [get_service_status, list_recent_deploys, get_ticket]
@@ -630,7 +670,7 @@ def build_incident_desk_graph(
             }
 
         # Mint short-lived signed MCP token carrying approved_by & operation_id
-        _mcp_token = mint_mcp_token(
+        mcp_token = mint_mcp_token(
             tenant_id=ctx.tenant_id,
             requester_id=ctx.requester_id,
             run_id=ctx.run_id,
@@ -638,30 +678,55 @@ def build_incident_desk_graph(
             operation_id=operation_id,
             secret=wf_deps.settings.mcp_token_secret,
         )
-        assert _mcp_token
 
         try:
             if wf_deps.simulate_write_timeout:
                 raise TimeoutError("Simulated downstream timeout")
 
             if plan.resource_type == "ticket" or plan.action == "update_ticket":
-                result = await domain.update_ticket(
-                    tenant_id=ctx.tenant_id,
-                    ticket_id=plan.ticket_id or plan.target_resource,
-                    status="resolved",
-                    note=plan.summary,
-                    operation_id=operation_id,
-                )
                 tool_id = "update_ticket"
+                if wf_deps.use_mcp_http:
+                    result = await call_mcp_tool(
+                        url=wf_deps.settings.mcp_ticketing_url,
+                        bearer_token=mcp_token,
+                        tool_name="update_ticket",
+                        arguments={
+                            "ticket_id": plan.ticket_id or plan.target_resource,
+                            "status": "resolved",
+                            "note": plan.summary,
+                            "idempotency_key": operation_id,
+                        },
+                    )
+                else:
+                    result = await domain.update_ticket(
+                        tenant_id=ctx.tenant_id,
+                        ticket_id=plan.ticket_id or plan.target_resource,
+                        status="resolved",
+                        note=plan.summary,
+                        operation_id=operation_id,
+                    )
             else:
-                result = await domain.execute_service_change(
-                    tenant_id=ctx.tenant_id,
-                    service_name=plan.target_resource,
-                    action=plan.action,
-                    target_version=plan.target_version,
-                    operation_id=operation_id,
-                )
                 tool_id = "execute_service_change"
+                if wf_deps.use_mcp_http:
+                    result = await call_mcp_tool(
+                        url=wf_deps.settings.mcp_infra_url,
+                        bearer_token=mcp_token,
+                        tool_name="execute_service_change",
+                        arguments={
+                            "service_name": plan.target_resource,
+                            "action": plan.action,
+                            "target_version": plan.target_version,
+                            "idempotency_key": operation_id,
+                        },
+                    )
+                else:
+                    result = await domain.execute_service_change(
+                        tenant_id=ctx.tenant_id,
+                        service_name=plan.target_resource,
+                        action=plan.action,
+                        target_version=plan.target_version,
+                        operation_id=operation_id,
+                    )
 
             # AC-2: Fault injection AFTER downstream commit, BEFORE checkpoint returns
             _maybe_inject_fault("after_write")
@@ -686,9 +751,17 @@ def build_incident_desk_graph(
                     details={"reason": "timeout; reconciling"},
                 )
             )
-            reconciled = await domain.get_operation_status(
-                tenant_id=ctx.tenant_id, operation_id=operation_id
-            )
+            if wf_deps.use_mcp_http:
+                reconciled = await call_mcp_tool(
+                    url=wf_deps.settings.mcp_infra_url,
+                    bearer_token=mcp_token,
+                    tool_name="get_operation_status",
+                    arguments={"operation_id": operation_id},
+                )
+            else:
+                reconciled = await domain.get_operation_status(
+                    tenant_id=ctx.tenant_id, operation_id=operation_id
+                )
             rec_decision = "succeeded" if reconciled["status"] == "succeeded" else "outcome_unknown"
             await _record_audit(
                 AuditEvent(
@@ -752,14 +825,42 @@ def build_incident_desk_graph(
         assert plan is not None
 
         if plan.resource_type == "ticket" or plan.action == "update_ticket":
-            ticket = await domain.get_ticket(
-                tenant_id=ctx.tenant_id, ticket_id=plan.ticket_id or plan.target_resource
-            )
+            if wf_deps.use_mcp_http:
+                tok = mint_mcp_token(
+                    tenant_id=ctx.tenant_id,
+                    requester_id=ctx.requester_id,
+                    run_id=ctx.run_id,
+                    secret=wf_deps.settings.mcp_token_secret,
+                )
+                ticket = await call_mcp_tool(
+                    url=wf_deps.settings.mcp_ticketing_url,
+                    bearer_token=tok,
+                    tool_name="get_ticket",
+                    arguments={"ticket_id": plan.ticket_id or plan.target_resource},
+                )
+            else:
+                ticket = await domain.get_ticket(
+                    tenant_id=ctx.tenant_id, ticket_id=plan.ticket_id or plan.target_resource
+                )
             passed = ticket["status"] == "resolved"
         else:
-            svc = await domain.get_service_status(
-                tenant_id=ctx.tenant_id, service_name=plan.target_resource
-            )
+            if wf_deps.use_mcp_http:
+                tok = mint_mcp_token(
+                    tenant_id=ctx.tenant_id,
+                    requester_id=ctx.requester_id,
+                    run_id=ctx.run_id,
+                    secret=wf_deps.settings.mcp_token_secret,
+                )
+                svc = await call_mcp_tool(
+                    url=wf_deps.settings.mcp_infra_url,
+                    bearer_token=tok,
+                    tool_name="get_service_status",
+                    arguments={"service_name": plan.target_resource},
+                )
+            else:
+                svc = await domain.get_service_status(
+                    tenant_id=ctx.tenant_id, service_name=plan.target_resource
+                )
             version_ok = (
                 svc["current_version"] == plan.target_version if plan.target_version else True
             )

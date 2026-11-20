@@ -454,6 +454,7 @@ class RunWorker:
             settings=self.settings,
             domain_store=domain,
             use_postgres=True,
+            use_mcp_http=(self.settings.mcp_transport == "http"),
             attempt=attempt,
         )
         graph = build_incident_desk_graph(deps=deps, checkpointer=checkpointer, store=store)
