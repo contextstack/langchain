@@ -360,6 +360,65 @@ async def test_e2e_api_worker_authenticated_mcp_http_crash_recovery_verified() -
                 and a["approved_by"] == "bob"
                 for a in audits
             )
+
+            # Also verify AC-16 cancel-after-write reconciliation routes over MCP HTTP
+            t2_id = (await client.post("/v1/threads", json={}, headers=alice_hdr)).json()[
+                "thread_id"
+            ]
+            r2_id = (
+                await client.post(
+                    f"/v1/threads/{t2_id}/runs",
+                    json={"request_text": "checkout-api returning 502s"},
+                    headers=alice_hdr,
+                )
+            ).json()["run_id"]
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                st2 = (await client.get(f"/v1/runs/{r2_id}", headers=alice_hdr)).json()["status"]
+                if st2 == "awaiting_approval":
+                    break
+                await asyncio.sleep(0.2)
+            assert st2 == "awaiting_approval"
+            _stop(w2)
+            w2 = None
+
+            apr2_id = (await client.get("/v1/approvals", headers=bob_hdr)).json()[0]["approval_id"]
+            w_crash2 = _spawn({"FAULT_INJECT": "after_write"})
+            try:
+                dec2 = await client.post(
+                    f"/v1/approvals/{apr2_id}/decision",
+                    json={"decision": "approve"},
+                    headers=bob_hdr,
+                )
+                assert dec2.status_code == 202
+                res2_id = dec2.json()["run_id"]
+                await asyncio.to_thread(w_crash2.wait, 10)
+                assert w_crash2.returncode == 137
+
+                cancel2 = await client.post(f"/v1/runs/{res2_id}/cancel", headers=alice_hdr)
+                assert cancel2.status_code == 200
+                assert cancel2.json()["cancel_requested"] is True
+
+                w2 = _spawn()
+                deadline = time.monotonic() + 15.0
+                rec_run: dict[str, object] = {}
+                while time.monotonic() < deadline:
+                    rec_run = (
+                        await client.get(f"/v1/runs/{res2_id}", headers=alice_hdr)
+                    ).json()
+                    if rec_run["status"] in {"succeeded", "failed", "cancelled"}:
+                        break
+                    await asyncio.sleep(0.2)
+                assert rec_run["status"] == "succeeded"
+                audits2 = (
+                    await client.get(f"/v1/audit?thread_id={t2_id}", headers=alice_hdr)
+                ).json()
+                assert any(
+                    a["event_type"] == "reconciliation" and a["decision"] == "succeeded"
+                    for a in audits2
+                )
+            finally:
+                _stop(w_crash2)
     finally:
         _stop(w1)
         _stop(w_crash)

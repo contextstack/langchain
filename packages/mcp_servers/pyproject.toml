@@ -8,6 +8,10 @@ dependencies = [
     "fastmcp>=2.0.0",
 ]
 
+[project.scripts]
+ops-mcp-infra = "mcp_servers.infra_server:run"
+ops-mcp-ticketing = "mcp_servers.ticketing_server:run"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

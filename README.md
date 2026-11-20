@@ -51,17 +51,18 @@ uv run ops-cli drill cancel-after-write
 
 ---
 
-## Interactive Demo (API + Worker + Single-File Web UI)
+## Interactive Demo (API + Worker + Authenticated MCP + Single-File Web UI)
 
-In two terminals:
-
-```bash
-uv run ops-worker
-```
+To run the full authenticated Streamable HTTP MCP path, start the two FastMCP servers, then the worker and API:
 
 ```bash
-uv run ops-api
+uv run ops-mcp-infra                      # Streamable HTTP MCP server on :8101
+uv run ops-mcp-ticketing                  # Streamable HTTP MCP server on :8102
+MCP_TRANSPORT=http uv run ops-worker      # Claims runs & calls MCP servers with signed JWTs
+uv run ops-api                            # FastAPI + single-file Demo UI on :8000
 ```
+
+*(For quick zero-daemon local runs without starting the MCP servers, omit `MCP_TRANSPORT=http` to use direct Postgres store mode.)*
 
 Open **`http://127.0.0.1:8000`** for the single-file Demo UI (persona/tenant switcher for `alice`, `bob`, `carol`, `dana`, authenticated `fetch()` SSE stream, and HITL Approval Inbox).
 

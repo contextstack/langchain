@@ -18,6 +18,7 @@ from langgraph.types import Command
 from psycopg_pool import AsyncConnectionPool
 
 from core.audit import AuditEvent, write_audit_event
+from core.auth import mint_mcp_token
 from core.config import Settings, get_settings
 from core.models import RunContext
 from mcp_servers.domain_store import PostgresDomainStore
@@ -28,6 +29,7 @@ from telemetry.tracing import (
 )
 from workflows.incident_desk.graph import WorkflowDeps, build_incident_desk_graph
 from workflows.incident_desk.version import RELEASE_VERSION, get_checkpoint_compat
+from workflows.mcp_client import call_mcp_tool
 
 WAKEUP_CHANNEL = "ops:runs:wakeup"
 CANCEL_CHANNEL = "ops:runs:cancel"
@@ -35,6 +37,18 @@ CANCEL_CHANNEL = "ops:runs:cancel"
 
 def _stream_key(run_id: str) -> str:
     return f"run:{run_id}:events"
+
+
+def _classify_terminal_state(vals: dict[str, Any]) -> tuple[str, str, str | None, str]:
+    """Single source of truth for terminal run/thread status across normal & recovery paths."""
+    final_st = str(vals.get("final_status") or "completed")
+    err_cat = vals.get("error_category")
+    failed_outcome = err_cat in {"fatal", "outcome_unknown"} or (
+        final_st in {"denied_plan_mismatch", "verification_failed"}
+    )
+    run_st = "failed" if failed_outcome else "succeeded"
+    thread_st = "failed" if run_st == "failed" else "completed"
+    return run_st, thread_st, err_cat, final_st
 
 
 class RunWorker:
@@ -94,7 +108,24 @@ class RunWorker:
         release_version: str,
     ) -> tuple[str, str, dict[str, Any]]:
         """Reconcile an in-flight MCP write before settling a cancelled/expired run."""
-        rec = await domain.get_operation_status(tenant_id=tenant_id, operation_id=operation_id)
+        if self.settings.mcp_transport == "http":
+            tok = mint_mcp_token(
+                tenant_id=tenant_id,
+                requester_id=requester_id,
+                run_id=run_id,
+                operation_id=operation_id,
+                secret=self.settings.mcp_token_secret,
+            )
+            rec = await call_mcp_tool(
+                url=self.settings.mcp_infra_url,
+                bearer_token=tok,
+                tool_name="get_operation_status",
+                arguments={"operation_id": operation_id},
+            )
+        else:
+            rec = await domain.get_operation_status(
+                tenant_id=tenant_id, operation_id=operation_id
+            )
         if rec["status"] == "succeeded":
             decision = "succeeded"
             run_status = "succeeded"
@@ -509,17 +540,25 @@ class RunWorker:
                     return
 
                 if not has_next and has_values and not has_interrupts:
-                    final_st = snap.values.get("final_status", "completed")
+                    vals = snap.values if snap else {}
+                    run_st, thread_st, err_cat, final_st = _classify_terminal_state(vals)
                     committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,
                         thread_id=thread_id,
                         attempt=attempt,
-                        run_status="succeeded",
-                        thread_status="completed" if final_st == "completed" else final_st,
+                        run_status=run_st,
+                        thread_status=thread_st,
+                        error_category=err_cat,
+                        error_detail=final_st,
                     )
                     if committed:
-                        await self._publish_event(rds, run_id, "done", {"status": final_st})
+                        await self._publish_event(
+                            rds,
+                            run_id,
+                            "done",
+                            {"status": run_st, "final_status": final_st},
+                        )
                     return
 
                 graph_input: Any
@@ -568,13 +607,7 @@ class RunWorker:
                         )
                 else:
                     vals = end_snap.values if end_snap else {}
-                    final_st = vals.get("final_status", "completed")
-                    err_cat = vals.get("error_category")
-                    failed_outcome = err_cat in {"fatal", "outcome_unknown"} or (
-                        final_st in {"denied_plan_mismatch", "verification_failed"}
-                    )
-                    run_st = "failed" if failed_outcome else "succeeded"
-                    thread_st = "failed" if run_st == "failed" else "completed"
+                    run_st, thread_st, err_cat, final_st = _classify_terminal_state(vals)
                     committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,

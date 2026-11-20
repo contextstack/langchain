@@ -653,3 +653,23 @@ async def test_ac7_offline_eval_regression_gate() -> None:
     assert report["total"] == 6
     assert report["calibration"] is not None
     assert report["calibration"]["agreement_rate"] == 1.0
+
+
+def test_worker_terminal_state_classification_consistent_across_recovery() -> None:
+    from worker.main import _classify_terminal_state  # noqa: PLC0415
+
+    r_st, t_st, _, detail = _classify_terminal_state({"final_status": "verification_failed"})
+    assert r_st == "failed"
+    assert t_st == "failed"
+    assert detail == "verification_failed"
+
+    r_st2, t_st2, _, detail2 = _classify_terminal_state(
+        {"final_status": "denied_plan_mismatch", "error_category": "permission_denied"}
+    )
+    assert r_st2 == "failed"
+    assert t_st2 == "failed"
+    assert detail2 == "denied_plan_mismatch"
+
+    r_st3, t_st3, _, _ = _classify_terminal_state({"final_status": "completed"})
+    assert r_st3 == "succeeded"
+    assert t_st3 == "completed"
