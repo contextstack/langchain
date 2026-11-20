@@ -320,7 +320,19 @@ async def test_m2_ac11_trace_redaction_across_all_export_paths() -> None:
     for secret in (secret_email, secret_phone, secret_key):
         assert secret not in captured_str
 
-    # 3. Direct Langfuse / LangSmith export masking helpers
+    # 3. Verify build_langchain_callbacks wraps langsmith & langfuse_callback in RedactingProxy
+    from core.config import Settings  # noqa: PLC0415
+    from telemetry.tracing import build_langchain_callbacks  # noqa: PLC0415
+
+    ls_callbacks = build_langchain_callbacks(Settings(telemetry_backend="langsmith"))
+    assert len(ls_callbacks) == 1
+    assert isinstance(ls_callbacks[0], RedactingCallbackProxy)
+
+    lf_callbacks = build_langchain_callbacks(Settings(telemetry_backend="langfuse_callback"))
+    assert len(lf_callbacks) == 1
+    assert isinstance(lf_callbacks[0], RedactingCallbackProxy)
+
+    # Direct export masking helpers
     cb_masked = mask_export_payload({"input": raw_input, "metadata": {"key": secret_key}})
     ls_masked = prepare_langsmith_export_record({"inputs": {"text": raw_input}})
     for secret in (secret_email, secret_phone, secret_key):

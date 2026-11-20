@@ -60,30 +60,40 @@ async def evaluate_triage_and_faithfulness(
     *,
     summary: str,
     cited_doc_ids: list[str],
-    retrieved_doc_ids: list[str],
+    retrieved_runbooks: list[dict[str, Any]],
     settings: Settings | None = None,
 ) -> TriageJudgeResult:
-    """Score faithfulness + triage quality (1-5) via LLM judge in gateway mode, rubric in mock."""
+    """Score faithfulness + triage quality (1-5) against full runbook text via LLM judge."""
     cfg = settings or get_settings()
+    retrieved_ids = [str(r["doc_id"]) for r in retrieved_runbooks]
     if cfg.model_mode == "mock":
         return _heuristic_triage_score(
             summary=summary,
             cited_doc_ids=cited_doc_ids,
-            retrieved_doc_ids=retrieved_doc_ids,
+            retrieved_doc_ids=retrieved_ids,
         )
 
     judge_model = get_chat_model(alias="ops-judge", settings=cfg)
     structured = judge_model.with_structured_output(TriageJudgeResult)
+    runbook_excerpts = "\n\n".join(
+        f"[{r['doc_id']}] {r.get('title', '')}\n{r.get('content', '')}" for r in retrieved_runbooks
+    )
     return await structured.ainvoke(
-        "Grade the IT/Ops incident plan on citation faithfulness (bool) and triage quality (1-5).\n"
-        f"Summary: {summary}\n"
-        f"Cited docs: {cited_doc_ids}\n"
-        f"Retrieved docs: {retrieved_doc_ids}"
+        "Grade the IT/Ops incident plan on:\n"
+        "1. faithful (bool): Are the summary claims grounded in the cited runbook text below?\n"
+        "2. triage_score (1-5): Operational clarity and actionability.\n\n"
+        f"Plan Summary: {summary}\n"
+        f"Cited Doc IDs: {cited_doc_ids}\n\n"
+        f"Retrieved Runbooks:\n{runbook_excerpts}"
     )
 
 
-def compute_calibration_agreement(calibration_path: Path) -> dict[str, Any]:
-    """Compare faithfulness & triage-quality scoring against hand-labeled calibration.jsonl."""
+async def compute_calibration_agreement(
+    calibration_path: Path,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Compare active judge (LLM in gateway mode, rubric in mock) against calibration.jsonl."""
     total = 0
     faithful_agreed = 0
     triage_within_1 = 0
@@ -91,10 +101,14 @@ def compute_calibration_agreement(calibration_path: Path) -> dict[str, Any]:
         if not line.strip():
             continue
         row = json.loads(line)
-        res = _heuristic_triage_score(
+        runbooks = row.get("retrieved_runbooks") or [
+            {"doc_id": d, "title": "", "content": ""} for d in row.get("retrieved_doc_ids", [])
+        ]
+        res = await evaluate_triage_and_faithfulness(
             summary=row["summary"],
             cited_doc_ids=row["cited_doc_ids"],
-            retrieved_doc_ids=row["retrieved_doc_ids"],
+            retrieved_runbooks=runbooks,
+            settings=settings,
         )
         total += 1
         if res.faithful == bool(row["human_faithful"]):

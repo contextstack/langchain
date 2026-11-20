@@ -84,14 +84,14 @@ async def run_eval_suite(
             if hasattr(plan, "citations")
             else [c["doc_id"] for c in (plan or {}).get("citations", [])]
         )
-        retrieved_ids = [r["doc_id"] for r in final.get("retrieved_runbooks", [])]
+        retrieved_runbooks = list(final.get("retrieved_runbooks", []))
         plan_summary = (
             plan.summary if hasattr(plan, "summary") else str((plan or {}).get("summary", ""))
         )
         judge_res = await evaluate_triage_and_faithfulness(
             summary=plan_summary,
             cited_doc_ids=cited_ids,
-            retrieved_doc_ids=retrieved_ids,
+            retrieved_runbooks=retrieved_runbooks,
         )
 
         case_passed = ok_end and ok_auth and ok_idem
@@ -112,7 +112,7 @@ async def run_eval_suite(
         )
 
     calibration = (
-        compute_calibration_agreement(calibration_path)
+        await compute_calibration_agreement(calibration_path)
         if calibration_path and calibration_path.exists()
         else None
     )
