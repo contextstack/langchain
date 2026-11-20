@@ -1,0 +1,84 @@
+[project]
+name = "contextstack-langchain"
+version = "0.1.0"
+description = "Enterprise-ready, 100% Python, OSS-first LangChain + LangGraph + MCP + OTel reference monorepo"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+dependencies = [
+    "cs-core",
+    "cs-gateway",
+    "cs-telemetry",
+    "cs-knowledge",
+    "cs-mcp-servers",
+    "cs-workflows",
+    "cs-api",
+    "cs-worker",
+    "cs-cli",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["evals"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "httpx>=0.28.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+    "langgraph-cli[inmem]>=0.2.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "packages/*",
+    "services/*",
+]
+
+[tool.uv.sources]
+cs-core = { workspace = true }
+cs-gateway = { workspace = true }
+cs-telemetry = { workspace = true }
+cs-knowledge = { workspace = true }
+cs-mcp-servers = { workspace = true }
+cs-workflows = { workspace = true }
+cs-api = { workspace = true }
+cs-worker = { workspace = true }
+cs-cli = { workspace = true }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "core",
+    "gateway",
+    "telemetry",
+    "knowledge",
+    "mcp_servers",
+    "workflows",
+    "api",
+    "worker",
+    "cli",
+    "evals",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true
