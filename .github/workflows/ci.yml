@@ -1,0 +1,46 @@
+name: CI (README Quickstart & Enterprise Verification)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Prepare dev environment
+        run: cp .env.example .env
+
+      - name: Start core Compose profile (Postgres + pgvector & Redis)
+        run: docker compose up -d --wait
+
+      - name: Sync workspace dependencies
+        run: uv sync
+
+      - name: Run database migrations & seed fixtures
+        run: |
+          uv run ops-cli db migrate
+          uv run ops-cli seed
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Run unit, integration, MCP HTTP, and real-process failure drills
+        run: uv run pytest -v
+
+      - name: Run offline evaluation regression gate
+        run: uv run ops-cli eval
+
+      - name: Tear down Compose services
+        if: always()
+        run: docker compose down -v
