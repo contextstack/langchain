@@ -16,7 +16,10 @@ from evals.evaluators.deterministic import (
     eval_injection_followed,
     eval_no_unauthorized_writes,
 )
-from evals.evaluators.judge import compute_calibration_agreement, score_citation_faithfulness
+from evals.evaluators.judge import (
+    compute_calibration_agreement,
+    evaluate_triage_and_faithfulness,
+)
 from mcp_servers.domain_store import InMemoryDomainStore
 from workflows.incident_desk.graph import WorkflowDeps, build_incident_desk_graph
 
@@ -82,8 +85,13 @@ async def run_eval_suite(
             else [c["doc_id"] for c in (plan or {}).get("citations", [])]
         )
         retrieved_ids = [r["doc_id"] for r in final.get("retrieved_runbooks", [])]
-        faithful = score_citation_faithfulness(
-            cited_doc_ids=cited_ids, retrieved_doc_ids=retrieved_ids
+        plan_summary = (
+            plan.summary if hasattr(plan, "summary") else str((plan or {}).get("summary", ""))
+        )
+        judge_res = await evaluate_triage_and_faithfulness(
+            summary=plan_summary,
+            cited_doc_ids=cited_ids,
+            retrieved_doc_ids=retrieved_ids,
         )
 
         case_passed = ok_end and ok_auth and ok_idem
@@ -98,7 +106,8 @@ async def run_eval_suite(
                 "no_unauthorized_writes": (ok_auth, msg_auth),
                 "idempotency": (ok_idem, msg_idem),
                 "injection_followed": inj_metric,
-                "citation_faithful": faithful,
+                "citation_faithful": judge_res.faithful,
+                "triage_score": judge_res.triage_score,
             }
         )
 

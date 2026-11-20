@@ -554,6 +554,7 @@ version = "0.1.0"
 source = { editable = "packages/telemetry" }
 dependencies = [
     { name = "cs-core" },
+    { name = "langchain-core" },
     { name = "langfuse" },
     { name = "langsmith", extra = ["otel"] },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -563,6 +564,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cs-core", editable = "packages/core" },
+    { name = "langchain-core", specifier = ">=1.0.0" },
     { name = "langfuse", specifier = ">=3.0.0" },
     { name = "langsmith", extras = ["otel"], specifier = ">=0.3.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.30.0" },

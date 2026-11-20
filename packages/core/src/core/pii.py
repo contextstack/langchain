@@ -36,4 +36,6 @@ def redact_obj(value: Any) -> Any:
         return [redact_obj(v) for v in value]
     if isinstance(value, tuple):
         return tuple(redact_obj(v) for v in value)
+    if hasattr(value, "model_dump"):
+        return redact_obj(value.model_dump(mode="json"))
     return value

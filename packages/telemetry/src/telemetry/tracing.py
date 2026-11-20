@@ -1,4 +1,4 @@
-"""OpenTelemetry, self-hosted Langfuse v4, and LangSmith seam configuration (spec §9.1-9.2)."""
+"""OpenTelemetry, self-hosted Langfuse v4, and LangSmith seam configuration (spec §9.1-9.3)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import base64
 import os
 from typing import Any
 
+from langchain_core.callbacks import BaseCallbackHandler
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
@@ -15,6 +16,56 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcess
 from core.config import Settings, get_settings
 from core.models import RunContext
 from telemetry.masking import PIISpanProcessor, mask_export_payload
+
+
+class RedactingCallbackProxy(BaseCallbackHandler):
+    """Wraps a LangChain callback handler and masks PII before forwarding events."""
+
+    def __init__(self, inner: BaseCallbackHandler) -> None:
+        super().__init__()
+        self._inner = inner
+
+    def on_chain_start(
+        self,
+        serialized: dict[str, Any],
+        inputs: dict[str, Any],
+        **kwargs: Any,
+    ) -> Any:
+        return self._inner.on_chain_start(
+            mask_export_payload(serialized),
+            mask_export_payload(inputs),
+            **kwargs,
+        )
+
+    def on_chain_end(self, outputs: dict[str, Any], **kwargs: Any) -> Any:
+        return self._inner.on_chain_end(mask_export_payload(outputs), **kwargs)
+
+    def on_llm_start(
+        self,
+        serialized: dict[str, Any],
+        prompts: list[str],
+        **kwargs: Any,
+    ) -> Any:
+        return self._inner.on_llm_start(
+            mask_export_payload(serialized),
+            mask_export_payload(prompts),
+            **kwargs,
+        )
+
+    def on_tool_start(
+        self,
+        serialized: dict[str, Any],
+        input_str: str,
+        **kwargs: Any,
+    ) -> Any:
+        return self._inner.on_tool_start(
+            mask_export_payload(serialized),
+            mask_export_payload(input_str),
+            **kwargs,
+        )
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> Any:
+        return self._inner.on_tool_end(mask_export_payload(output), **kwargs)
 
 
 def build_trace_attributes(
@@ -77,21 +128,33 @@ def configure_tracer_provider(
     return provider
 
 
-def build_langchain_callbacks(settings: Settings | None = None) -> list[Any]:
-    """Return LangChain callbacks for the active telemetry backend (e.g. langfuse_callback)."""
+def build_langchain_callbacks(settings: Settings | None = None) -> list[BaseCallbackHandler]:
+    """Return PII-masked LangChain callbacks for the active telemetry backend."""
     cfg = settings or get_settings()
-    if cfg.telemetry_backend != "langfuse_callback":
-        return []
-    try:
-        from langfuse.langchain import CallbackHandler  # noqa: PLC0415
+    if cfg.telemetry_backend == "langfuse_callback":
+        try:
+            from langfuse.langchain import CallbackHandler  # noqa: PLC0415
 
-        return [CallbackHandler()]
-    except Exception:
-        return []
+            return [RedactingCallbackProxy(CallbackHandler())]
+        except Exception:
+            return []
+    if cfg.telemetry_backend == "langsmith":
+        try:
+            from langchain_core.tracers import LangChainTracer  # noqa: PLC0415
+            from langsmith import Client  # noqa: PLC0415
+
+            client = Client(
+                hide_inputs=mask_export_payload,
+                hide_outputs=mask_export_payload,
+            )
+            return [RedactingCallbackProxy(LangChainTracer(client=client))]
+        except Exception:
+            return []
+    return []
 
 
 def prepare_langsmith_export_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Apply shared PII masking before LangSmith export (used by redaction hooks & AC-11 tests)."""
+    """Apply shared PII masking before LangSmith export."""
     masked = mask_export_payload(record)
     assert isinstance(masked, dict)
     return masked

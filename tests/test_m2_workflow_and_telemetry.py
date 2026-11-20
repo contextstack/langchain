@@ -262,11 +262,15 @@ async def test_m2_ac5_prompt_injection_cross_tenant_and_in_tenant() -> None:
     assert len(store.operations) == 0
 
 
-def test_m2_ac11_trace_redaction_across_all_export_paths() -> None:
+async def test_m2_ac11_trace_redaction_across_all_export_paths() -> None:
+    from langchain_core.callbacks import BaseCallbackHandler  # noqa: PLC0415
+
+    from telemetry.tracing import RedactingCallbackProxy  # noqa: PLC0415
+
     secret_email = "leak.user@enterprise.example"
     secret_phone = "415-555-0199"
     secret_key = "sk-live-9876543210abcdef1234"
-    raw_input = f"Call {secret_email} at {secret_phone} using {secret_key}"
+    raw_input = f"status only check: contact {secret_email} at {secret_phone} using {secret_key}"
 
     # 1. OTel export path (langfuse_otel) via InMemorySpanExporter
     exporter = InMemorySpanExporter()
@@ -286,12 +290,39 @@ def test_m2_ac11_trace_redaction_across_all_export_paths() -> None:
     for secret in (secret_email, secret_phone, secret_key):
         assert secret not in str(exported_attrs)
 
-    # 2. Langfuse callback payload path
-    cb_masked = mask_export_payload({"input": raw_input, "metadata": {"key": secret_key}})
-    for secret in (secret_email, secret_phone, secret_key):
-        assert secret not in str(cb_masked)
+    # 2. Live LangGraph execution through RedactingCallbackProxy (Langfuse/LangSmith callback path)
+    captured: list[object] = []
 
-    # 3. LangSmith export record path
+    class _CapturingHandler(BaseCallbackHandler):
+        def on_chain_start(self, serialized, inputs, **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(inputs)
+
+        def on_chain_end(self, outputs, **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(outputs)
+
+        def on_tool_end(self, output, **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(output)
+
+    deps = WorkflowDeps(domain_store=InMemoryDomainStore(), use_postgres=False)
+    graph = build_incident_desk_graph(deps=deps, checkpointer=InMemorySaver())
+    await graph.ainvoke(
+        {"request_text": raw_input},
+        config={
+            "configurable": {"thread_id": "t-ac11-cb"},
+            "callbacks": [RedactingCallbackProxy(_CapturingHandler())],
+        },
+        context=ctx,
+        durability="sync",
+    )
+    assert len(captured) > 0
+    captured_str = str(captured)
+    assert "[REDACTED_EMAIL]" in captured_str
+    for secret in (secret_email, secret_phone, secret_key):
+        assert secret not in captured_str
+
+    # 3. Direct Langfuse / LangSmith export masking helpers
+    cb_masked = mask_export_payload({"input": raw_input, "metadata": {"key": secret_key}})
     ls_masked = prepare_langsmith_export_record({"inputs": {"text": raw_input}})
     for secret in (secret_email, secret_phone, secret_key):
+        assert secret not in str(cb_masked)
         assert secret not in str(ls_masked)

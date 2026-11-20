@@ -21,7 +21,11 @@ from core.audit import AuditEvent, write_audit_event
 from core.config import Settings, get_settings
 from core.models import RunContext
 from mcp_servers.domain_store import PostgresDomainStore
-from telemetry.tracing import build_trace_attributes, configure_tracer_provider
+from telemetry.tracing import (
+    build_langchain_callbacks,
+    build_trace_attributes,
+    configure_tracer_provider,
+)
 from workflows.incident_desk.graph import WorkflowDeps, build_incident_desk_graph
 from workflows.incident_desk.version import RELEASE_VERSION, get_checkpoint_compat
 
@@ -471,6 +475,9 @@ class RunWorker:
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self.settings.max_graph_steps,
         }
+        callbacks = build_langchain_callbacks(self.settings)
+        if callbacks:
+            config["callbacks"] = callbacks
 
         lost_lease = asyncio.Event()
         hb_task = asyncio.create_task(
