@@ -451,7 +451,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (run_id,),
             )
             if cur.rowcount == 1:
-                next_thread_status = "idle" if run_kind == "start" else "cancelled"
+                await cur.execute(
+                    "SELECT status FROM app_threads WHERE thread_id = %s FOR UPDATE",
+                    (thread_id,),
+                )
+                t_row = await cur.fetchone()
+                current_thread_status = t_row[0] if t_row else "idle"
+
+                await cur.execute(
+                    """
+                    SELECT 1
+                      FROM runs
+                     WHERE thread_id = %s
+                       AND run_id <> %s
+                       AND status IN ('running', 'queued')
+                     LIMIT 1
+                    """,
+                    (thread_id, run_id),
+                )
+                has_other_active_run = (await cur.fetchone()) is not None
+
+                if current_thread_status == "awaiting_approval":
+                    next_thread_status = "awaiting_approval"
+                elif has_other_active_run:
+                    next_thread_status = "running"
+                else:
+                    next_thread_status = "idle" if run_kind == "start" else "cancelled"
+
                 await cur.execute(
                     "UPDATE app_threads SET status = %s, updated_at = now() "
                     "WHERE thread_id = %s",

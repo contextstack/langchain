@@ -134,6 +134,88 @@ async def test_queued_followup_does_not_strand_pending_approval() -> None:
                 await asyncio.wait_for(worker_task, timeout=5.0)
 
 
+async def test_cancel_queued_followup_preserves_pending_approval() -> None:
+    """Cancelling a queued follow-up behind a pending approval keeps thread awaiting_approval."""
+    settings = get_settings()
+    await apply_app_migrations(settings.database_admin_url)
+    async with await psycopg.AsyncConnection.connect(
+        settings.database_admin_url, autocommit=True
+    ) as conn:
+        await conn.execute(
+            "TRUNCATE TABLE runs, approvals, app_threads, mock_operations RESTART IDENTITY CASCADE;"
+        )
+    async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
+        await seed_knowledge_and_domain(conn, embeddings=DeterministicMockEmbeddings())
+
+    app = create_app(settings)
+    worker = RunWorker(settings=settings, worker_id="w-cancel-followup", poll_interval_s=0.1)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        alice_tok = (await client.post("/v1/dev/token", json={"persona": "alice"})).json()["token"]
+        bob_tok = (await client.post("/v1/dev/token", json={"persona": "bob"})).json()["token"]
+        alice_h = {"Authorization": f"Bearer {alice_tok}"}
+        bob_h = {"Authorization": f"Bearer {bob_tok}"}
+
+        t_id = (
+            await client.post(
+                "/v1/threads", headers=alice_h, json={"workflow_name": "incident_desk"}
+            )
+        ).json()["thread_id"]
+        r1 = (
+            await client.post(
+                f"/v1/threads/{t_id}/runs",
+                headers=alice_h,
+                json={"request_text": "checkout-api returning 502s after v2.4.1 deploy"},
+            )
+        ).json()["run_id"]
+        r2 = (
+            await client.post(
+                f"/v1/threads/{t_id}/runs",
+                headers=alice_h,
+                json={"request_text": "status only check", "multitask_strategy": "enqueue"},
+            )
+        ).json()["run_id"]
+
+        worker_task = asyncio.create_task(worker.serve_forever())
+        try:
+            await _poll_run(client, alice_h, r1, {"awaiting_approval"})
+
+            # Cancel the queued follow-up r2 while r1's approval is pending
+            cancel_resp = await client.post(f"/v1/runs/{r2}/cancel", headers=alice_h)
+            assert cancel_resp.status_code == 200
+            cancel_body = cancel_resp.json()
+            assert cancel_body["status"] == "cancelled"
+            assert cancel_body["thread_status"] == "awaiting_approval", cancel_body
+
+            # Thread must still be awaiting_approval and approval must remain in inbox
+            threads = (await client.get("/v1/threads", headers=alice_h)).json()
+            t_state = next(t for t in threads if t["thread_id"] == t_id)
+            assert t_state["status"] == "awaiting_approval", t_state
+
+            inbox = (await client.get("/v1/approvals", headers=bob_h)).json()
+            matching = [a for a in inbox if a["thread_id"] == t_id]
+            assert len(matching) == 1, f"Approval hidden after cancelling follow-up: {inbox}"
+
+            # Approver decision must succeed (202, not 409) and complete the rollback
+            dec = await client.post(
+                f"/v1/approvals/{matching[0]['approval_id']}/decision",
+                headers=bob_h,
+                json={"decision": "approve"},
+            )
+            assert dec.status_code == 202, dec.text
+            res_state = await _poll_run(
+                client, bob_h, dec.json()["run_id"], {"succeeded", "failed"}
+            )
+            assert res_state["status"] == "succeeded", res_state
+        finally:
+            worker.request_stop()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(worker_task, timeout=5.0)
+
+
 async def test_concurrent_claim_on_same_thread_does_not_raise_unique_violation() -> None:
     """Reproduce two workers claiming queued runs on the same thread at the commit boundary."""
     settings = get_settings()
