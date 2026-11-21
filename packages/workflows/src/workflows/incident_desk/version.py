@@ -9,6 +9,11 @@ import os
 
 from core import policy as policy_module
 from core.tool_contract import TOOL_CONTRACTS
+from workflows.spec_constants import (
+    GOVERNED_GRAPH_EDGES,
+    GOVERNED_GRAPH_NODES,
+    PROPOSE_PLAN_PROMPT_TEMPLATE,
+)
 
 PACKAGE_SEMVER = "0.1.0"
 CHECKPOINT_COMPAT = 1
@@ -20,25 +25,11 @@ INVESTIGATE_SYSTEM_PROMPT = (
 )
 
 GRAPH_TOPOLOGY_SPEC = {
-    "nodes": [
-        "retrieve_context",
-        "investigate",
-        "propose_plan",
-        "finalize_no_action",
-        "evaluate_policy",
-        "finalize_denied",
-        "record_approval_request",
-        "await_approval",
-        "finalize_rejected",
-        "revalidate_edit",
-        "execute_change",
-        "verify_end_state",
-    ],
+    "nodes": list(GOVERNED_GRAPH_NODES),
+    "edges": [list(e) for e in GOVERNED_GRAPH_EDGES],
     "prompts": {
         "investigate": INVESTIGATE_SYSTEM_PROMPT,
-        "propose_plan": (
-            "Produce a structured ChangePlan grounded in the retrieved runbooks and tool outputs."
-        ),
+        "propose_plan": PROPOSE_PLAN_PROMPT_TEMPLATE,
     },
 }
 

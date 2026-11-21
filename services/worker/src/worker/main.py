@@ -20,7 +20,6 @@ from langgraph.types import Command
 from psycopg_pool import AsyncConnectionPool
 
 from core.audit import AuditEvent, write_audit_event
-from core.auth import mint_mcp_token
 from core.config import Settings, get_settings
 from core.db import set_system_rls_bypass, set_tenant_context
 from core.models import RunContext
@@ -32,8 +31,8 @@ from telemetry.tracing import (
 )
 from workflows.incident_desk.graph import WorkflowDeps, build_incident_desk_graph
 from workflows.incident_desk.version import RELEASE_VERSION
-from workflows.mcp_client import call_mcp_tool
 from workflows.registry import get_workflow_spec
+from workflows.tool_executor import ToolExecutor
 
 WAKEUP_CHANNEL = "ops:runs:wakeup"
 CANCEL_CHANNEL = "ops:runs:cancel"
@@ -132,35 +131,24 @@ class RunWorker:
         mcp_url: str | None = None,
     ) -> tuple[str, str, str | None, dict[str, Any]]:
         """Reconcile an in-flight MCP write before settling a cancelled/expired run."""
-        try:
-            if self.settings.mcp_transport == "http":
-                tok = mint_mcp_token(
-                    tenant_id=tenant_id,
-                    requester_id=requester_id,
-                    run_id=run_id,
-                    operation_id=operation_id,
-                    secret=self.settings.mcp_token_secret,
-                )
-                rec = await asyncio.wait_for(
-                    call_mcp_tool(
-                        url=mcp_url or self.settings.mcp_infra_url,
-                        bearer_token=tok,
-                        tool_name="get_operation_status",
-                        arguments={"operation_id": operation_id},
-                    ),
-                    timeout=self.settings.tool_timeout_s,
-                )
-            else:
-                rec = await asyncio.wait_for(
-                    domain.get_operation_status(tenant_id=tenant_id, operation_id=operation_id),
-                    timeout=self.settings.tool_timeout_s,
-                )
-        except Exception as exc:
-            rec = {
-                "operation_id": operation_id,
-                "status": "outcome_unknown",
-                "error": str(exc),
-            }
+        executor = ToolExecutor(
+            settings=self.settings,
+            domain_store=domain,
+            use_mcp_http=(self.settings.mcp_transport == "http"),
+        )
+        ctx = RunContext(
+            tenant_id=tenant_id,
+            requester_id=requester_id,
+            requester_roles=frozenset(),
+            thread_id=thread_id,
+            run_id=run_id,
+            request_id=f"reconcile-{run_id}",
+        )
+        rec = await executor.reconcile_operation(
+            ctx,
+            mcp_url=mcp_url or self.settings.mcp_infra_url,
+            operation_id=operation_id,
+        )
 
         if rec.get("status") == "succeeded":
             decision = "succeeded"

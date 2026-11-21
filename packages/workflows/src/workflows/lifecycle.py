@@ -37,6 +37,7 @@ from knowledge.fixtures import SEED_RUNBOOKS
 from knowledge.retriever import retrieve_runbooks
 from mcp_servers.domain_store import DomainStore, InMemoryDomainStore, PostgresDomainStore
 from workflows.incident_desk.state import IncidentDeskState
+from workflows.spec_constants import PROPOSE_PLAN_PROMPT_TEMPLATE
 from workflows.tool_executor import ToolExecutor, WriteSpec
 
 
@@ -272,9 +273,11 @@ def build_governed_workflow_graph(
             safe_summary = redact_text(state.get("investigation_summary", ""))
             safe_runbooks = redact_obj(runbooks)
             plan = await structured.ainvoke(
-                f"Request: {safe_req}\n"
-                f"Investigation: {safe_summary}\n"
-                f"Runbooks: {json.dumps(safe_runbooks)}"
+                PROPOSE_PLAN_PROMPT_TEMPLATE.format(
+                    request=safe_req,
+                    investigation=safe_summary,
+                    runbooks=json.dumps(safe_runbooks),
+                )
             )
 
         return {"change_plan": plan.model_dump(mode="json")}

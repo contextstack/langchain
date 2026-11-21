@@ -109,7 +109,9 @@ class ToolExecutor:
         operation_id: str,
         approved_by: str | None = None,
     ) -> dict[str, Any]:
-        contract = TOOL_CONTRACTS["get_operation_status"]
+        contract = TOOL_CONTRACTS["get_operation_status"].model_copy(
+            update={"timeout_s": self.settings.tool_timeout_s}
+        )
 
         async def _call() -> dict[str, Any]:
             if self.use_mcp_http:
