@@ -15,6 +15,7 @@ class IncidentDeskState(TypedDict, total=False):
     request_text: str
     release_version: str
     retrieved_runbooks: list[dict[str, Any]]
+    prior_memories: list[dict[str, Any]]
     investigation_summary: str
     change_plan: ChangePlan | dict[str, Any] | None
     policy_decision: Literal["require_approval", "deny"] | None

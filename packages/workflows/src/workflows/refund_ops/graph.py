@@ -203,9 +203,18 @@ def build_refund_ops_graph(
                 and (set(rb.allowed_roles) & set(ctx.requester_roles))
             ]
 
+        prior_memories: list[dict[str, Any]] = []
+        if runtime.store is not None:
+            mem_items = await runtime.store.asearch(
+                (ctx.tenant_id, "memory", "refund_ops"),
+                limit=5,
+            )
+            prior_memories = [dict(item.value) for item in mem_items]
+
         return {
             "release_version": RELEASE_VERSION,
             "retrieved_runbooks": runbooks,
+            "prior_memories": prior_memories,
         }
 
     # ------------------------------------------------------------------
@@ -724,6 +733,21 @@ def build_refund_ops_graph(
             and int(acct["balance_cents"]) == int(expected_balance)
             and acct["status"] == "active"
         )
+        if passed and runtime.store is not None:
+            op_key = state.get("operation_id") or ctx.run_id
+            await runtime.store.aput(
+                (ctx.tenant_id, "memory", "refund_ops"),
+                op_key,
+                {
+                    "thread_id": ctx.thread_id,
+                    "operation_id": op_key,
+                    "target": plan.target_resource,
+                    "action": plan.action,
+                    "amount_cents": plan.amount_cents,
+                    "summary": redact_text(plan.summary),
+                },
+            )
+
         return {
             "verification_passed": passed,
             "final_status": "completed" if passed else "verification_failed",

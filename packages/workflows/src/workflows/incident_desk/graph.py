@@ -309,9 +309,18 @@ def build_incident_desk_graph(
                 and (set(rb.allowed_roles) & set(ctx.requester_roles))
             ]
 
+        prior_memories: list[dict[str, Any]] = []
+        if runtime.store is not None:
+            mem_items = await runtime.store.asearch(
+                (ctx.tenant_id, "memory", "incident_desk"),
+                limit=5,
+            )
+            prior_memories = [dict(item.value) for item in mem_items]
+
         return {
             "release_version": RELEASE_VERSION,
             "retrieved_runbooks": runbooks,
+            "prior_memories": prior_memories,
         }
 
     # ------------------------------------------------------------------
@@ -870,6 +879,20 @@ def build_incident_desk_graph(
                 svc["current_version"] == plan.target_version if plan.target_version else True
             )
             passed = svc["status"] == "healthy" and version_ok
+
+        if passed and runtime.store is not None:
+            op_key = state.get("operation_id") or ctx.run_id
+            await runtime.store.aput(
+                (ctx.tenant_id, "memory", "incident_desk"),
+                op_key,
+                {
+                    "thread_id": ctx.thread_id,
+                    "operation_id": op_key,
+                    "target": plan.target_resource,
+                    "action": plan.action,
+                    "summary": redact_text(plan.summary),
+                },
+            )
 
         return {
             "verification_passed": passed,
