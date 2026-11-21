@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Auth & MCP (>=32 bytes for HS256)
     jwt_signing_secret: str = "dev-only-jwt-secret-key-at-least-32-bytes-long"
     mcp_token_secret: str = "dev-only-mcp-secret-key-at-least-32-bytes-long"
+    enable_dev_tokens: bool = True
     mcp_infra_url: str = "http://127.0.0.1:8101/mcp"
     mcp_ticketing_url: str = "http://127.0.0.1:8102/mcp"
     mcp_billing_url: str = "http://127.0.0.1:8103/mcp"

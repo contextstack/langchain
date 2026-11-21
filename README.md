@@ -85,10 +85,10 @@ uv run ops-cli drill cancel-after-write
    *(For quick zero-daemon local runs without starting the MCP servers, omit `MCP_TRANSPORT=http` to use direct Postgres store mode.)*
 
 3. **Run the human-in-the-loop workflow in the Demo UI (`http://127.0.0.1:8000`):**
-   - Pick **`incident_desk`** (or switch to **`refund_ops`**) and stay as **`alice@tenant-alpha [engineer]`**.
+   - Pick **`incident_desk`** (or switch to **`refund_ops`**) and select **`dana@tenant-alpha [engineer, ops-approver]`**.
    - Click **Submit Request** — watch the live SSE stream investigate via read-only tools, propose a typed `ChangePlan`, pass `PolicyEngine`, and pause at `interrupt` (`awaiting_approval`).
-   - Switch persona to **`dana`** (or stay as `alice`) to verify separation-of-duties / role enforcement, then switch to **`bob@tenant-alpha [ops-approver]`**.
-   - Click **Approve** in the HITL Approval Inbox — the worker resumes the checkpoint, executes the idempotent write over authenticated MCP HTTP, verifies the post-write state, and streams `done`.
+   - Stay as **`dana`** and click **Approve** in the HITL Approval Inbox — it is refused (`403`) by separation of duties because the requester cannot approve their own change.
+   - Switch persona to **`bob@tenant-alpha [ops-approver]`** and click **Approve** — the worker resumes the checkpoint, executes the idempotent write over authenticated MCP HTTP, verifies the post-write state, and streams `done`.
 
 4. **Inspect the append-only PostgreSQL audit trail:**
    ```bash
@@ -96,9 +96,10 @@ uv run ops-cli drill cancel-after-write
      "SELECT created_at, event_type, requested_by, approved_by, tool_id, decision, operation_id
         FROM audit_log ORDER BY created_at DESC LIMIT 8;"
    ```
-   Notice that `audit_log` records both `requested_by = alice` and `approved_by = bob` alongside the `operation_id`, and `app_rw` cannot `UPDATE` or `DELETE` rows (enforced by both role grants and a DB trigger).
+   Notice that `audit_log` records both `requested_by = dana` and `approved_by = bob` alongside the `operation_id`, and `app_rw` cannot `UPDATE` or `DELETE` rows (enforced by both role grants and a DB trigger).
 
-5. **Run a real worker-kill crash drill:**
+5. **Run a real worker-kill crash drill (disposable local DB only):**
+   > **Note:** `ops-cli drill` truncates `runs`, `approvals`, `app_threads`, and `mock_operations` in the configured database before running. Only run drills against a disposable local dev stack.
    ```bash
    uv run ops-cli drill crash-after-write
    ```

@@ -10,6 +10,7 @@ from psycopg import AsyncConnection
 from pydantic import BaseModel
 
 from core.db import set_system_rls_bypass, set_tenant_context
+from core.pii import redact_text
 from knowledge.fixtures import SEED_ACCOUNTS, SEED_RUNBOOKS, SEED_SERVICES, SEED_TICKETS
 
 
@@ -37,7 +38,7 @@ async def retrieve_runbooks(
     """Query kb_documents with BOTH Postgres RLS and SQL-level tenant_id + role filtering."""
     if not roles:
         return []
-    query_vec = format_pgvector(embeddings.embed_query(query))
+    query_vec = format_pgvector(embeddings.embed_query(redact_text(query)))
     async with conn.transaction(), conn.cursor() as cur:
         await set_tenant_context(conn, tenant_id)
         await cur.execute(

@@ -52,13 +52,18 @@ def get_chat_model(
     return model
 
 
-def get_embeddings(*, settings: Settings | None = None) -> Embeddings:
+def get_embeddings(
+    *,
+    tenant_id: str | None = None,
+    settings: Settings | None = None,
+) -> Embeddings:
     """Return 1536-dim embeddings (LiteLLM ops-embed in gateway mode, deterministic mock in CI)."""
     cfg = settings or get_settings()
     if cfg.model_mode == "mock":
         return DeterministicMockEmbeddings()
+    api_key = _tenant_litellm_key(tenant_id, cfg) if tenant_id else cfg.litellm_master_key
     return OpenAIEmbeddings(
         model="ops-embed",
         base_url=cfg.litellm_url,
-        api_key=cfg.litellm_master_key,
+        api_key=api_key,
     )

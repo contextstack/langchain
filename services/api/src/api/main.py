@@ -152,7 +152,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/dev/token")
     async def dev_token(body: DevTokenRequest) -> dict[str, Any]:
-        """Local dev helper for the single-file UI persona switcher."""
+        """Local dev helper for the single-file UI persona switcher (disable in shared envs)."""
+        if not cfg.enable_dev_tokens:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Dev token endpoint is disabled (ENABLE_DEV_TOKENS=false)",
+            )
         ident = DEV_PERSONAS[body.persona]
         token = mint_user_jwt(ident, secret=cfg.jwt_signing_secret)
         return {

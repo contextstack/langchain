@@ -282,7 +282,7 @@ def build_incident_desk_graph(
         ctx = _ctx(runtime)
         query = state.get("request_text", "")
         if wf_deps.use_postgres:
-            embeddings = get_embeddings(settings=wf_deps.settings)
+            embeddings = get_embeddings(tenant_id=ctx.tenant_id, settings=wf_deps.settings)
             async with await psycopg.AsyncConnection.connect(
                 wf_deps.settings.database_url
             ) as conn:
