@@ -27,7 +27,7 @@ from mcp_servers.billing_server import create_billing_server
 from mcp_servers.domain_store import InMemoryDomainStore, PostgresDomainStore
 from mcp_servers.infra_server import create_infra_server
 from mcp_servers.ticketing_server import create_ticketing_server
-from worker.main import RunWorker
+from worker.main import ClaimedRun, RunWorker
 from workflows.incident_desk.graph import WorkflowDeps, build_incident_desk_graph
 from workflows.refund_ops.graph import (
     build_refund_ops_graph,
@@ -454,19 +454,19 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                 rds,
                 checkpointer,
                 store,
-                {
-                    "run_id": r_unk,
-                    "thread_id": t_unk,
-                    "tenant_id": "tenant-alpha",
-                    "kind": "start",
-                    "input": {},
-                    "attempt": 1,
-                    "created_by": "alice",
-                    "creator_roles": frozenset({"engineer"}),
-                    "release_version": "0.1.0+test",
-                    "checkpoint_compat": 1,
-                    "workflow_name": "nonexistent_wf",
-                },
+                ClaimedRun(
+                    run_id=r_unk,
+                    thread_id=t_unk,
+                    tenant_id="tenant-alpha",
+                    kind="start",
+                    input={},
+                    attempt=1,
+                    created_by="alice",
+                    creator_roles=frozenset({"engineer"}),
+                    release_version="0.1.0+test",
+                    checkpoint_compat=1,
+                    workflow_name="nonexistent_wf",
+                ),
             )
             async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 await set_system_rls_bypass(conn)
@@ -504,19 +504,19 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                 rds,
                 checkpointer,
                 store,
-                {
-                    "run_id": r_cmp,
-                    "thread_id": t_cmp,
-                    "tenant_id": "tenant-alpha",
-                    "kind": "start",
-                    "input": {},
-                    "attempt": 1,
-                    "created_by": "alice",
-                    "creator_roles": frozenset({"engineer"}),
-                    "release_version": "0.1.0+old",
-                    "checkpoint_compat": 99,
-                    "workflow_name": "incident_desk",
-                },
+                ClaimedRun(
+                    run_id=r_cmp,
+                    thread_id=t_cmp,
+                    tenant_id="tenant-alpha",
+                    kind="start",
+                    input={},
+                    attempt=1,
+                    created_by="alice",
+                    creator_roles=frozenset({"engineer"}),
+                    release_version="0.1.0+old",
+                    checkpoint_compat=99,
+                    workflow_name="incident_desk",
+                ),
             )
             async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 await set_system_rls_bypass(conn)
@@ -569,19 +569,19 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                     """,
                     (r_rec, t_rec, worker.worker_id),
                 )
-            claimed_rec = {
-                "run_id": r_rec,
-                "thread_id": t_rec,
-                "tenant_id": "tenant-alpha",
-                "kind": "start",
-                "input": {"request_text": "checkout-api returning 502s"},
-                "attempt": 1,
-                "created_by": "alice",
-                "creator_roles": frozenset({"engineer"}),
-                "release_version": "0.1.0+test",
-                "checkpoint_compat": 1,
-                "workflow_name": "incident_desk",
-            }
+            claimed_rec = ClaimedRun(
+                run_id=r_rec,
+                thread_id=t_rec,
+                tenant_id="tenant-alpha",
+                kind="start",
+                input={"request_text": "checkout-api returning 502s"},
+                attempt=1,
+                created_by="alice",
+                creator_roles=frozenset({"engineer"}),
+                release_version="0.1.0+test",
+                checkpoint_compat=1,
+                workflow_name="incident_desk",
+            )
             # Run attempt 1 to hit interrupt, then simulate attempt 2 recovery on the same interrupt
             await worker._execute_claimed_run(pool, rds, checkpointer, store, claimed_rec)
             async with pool.connection() as conn, conn.transaction():
@@ -596,7 +596,11 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                     (worker.worker_id, r_rec),
                 )
             await worker._execute_claimed_run(
-                pool, rds, checkpointer, store, {**claimed_rec, "attempt": 2}
+                pool,
+                rds,
+                checkpointer,
+                store,
+                ClaimedRun(**{**claimed_rec.__dict__, "attempt": 2}),
             )
             async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 await set_system_rls_bypass(conn)
@@ -702,19 +706,19 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                 rds,
                 checkpointer,
                 store,
-                {
-                    "run_id": r_can_in,
-                    "thread_id": t_rec,
-                    "tenant_id": "tenant-alpha",
-                    "kind": "start",
-                    "input": {"request_text": "status only check"},
-                    "attempt": 1,
-                    "created_by": "alice",
-                    "creator_roles": frozenset({"engineer"}),
-                    "release_version": "0.1.0+test",
-                    "checkpoint_compat": 1,
-                    "workflow_name": "incident_desk",
-                },
+                ClaimedRun(
+                    run_id=r_can_in,
+                    thread_id=t_rec,
+                    tenant_id="tenant-alpha",
+                    kind="start",
+                    input={"request_text": "status only check"},
+                    attempt=1,
+                    created_by="alice",
+                    creator_roles=frozenset({"engineer"}),
+                    release_version="0.1.0+test",
+                    checkpoint_compat=1,
+                    workflow_name="incident_desk",
+                ),
             )
             async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 await set_system_rls_bypass(conn)
@@ -748,19 +752,19 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                     """,
                     (r_done, t_done, worker.worker_id),
                 )
-            claimed_done = {
-                "run_id": r_done,
-                "thread_id": t_done,
-                "tenant_id": "tenant-alpha",
-                "kind": "start",
-                "input": {"request_text": "status only check"},
-                "attempt": 1,
-                "created_by": "alice",
-                "creator_roles": frozenset({"engineer"}),
-                "release_version": "0.1.0+test",
-                "checkpoint_compat": 1,
-                "workflow_name": "incident_desk",
-            }
+            claimed_done = ClaimedRun(
+                run_id=r_done,
+                thread_id=t_done,
+                tenant_id="tenant-alpha",
+                kind="start",
+                input={"request_text": "status only check"},
+                attempt=1,
+                created_by="alice",
+                creator_roles=frozenset({"engineer"}),
+                release_version="0.1.0+test",
+                checkpoint_compat=1,
+                workflow_name="incident_desk",
+            )
             await worker._execute_claimed_run(pool, rds, checkpointer, store, claimed_done)
             # Re-run attempt=2 on already-completed checkpoint -> recovery branch
             async with pool.connection() as conn, conn.transaction():
@@ -775,7 +779,11 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                     (worker.worker_id, r_done),
                 )
             await worker._execute_claimed_run(
-                pool, rds, checkpointer, store, {**claimed_done, "attempt": 2}
+                pool,
+                rds,
+                checkpointer,
+                store,
+                ClaimedRun(**{**claimed_done.__dict__, "attempt": 2}),
             )
             async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 await set_system_rls_bypass(conn)
@@ -783,6 +791,21 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                 assert (await cur.fetchone())[0] == "succeeded"
 
             # 9. _execute_claimed_run: CancelledError, TimeoutError, and fatal Exception
+            #    using an injected controlled graph runner to prove each outcome distinctly.
+            class _ControlledGraph:
+                def __init__(self, mode: str) -> None:
+                    self._mode = mode
+
+                async def aget_state(self, config: dict) -> None:
+                    return None
+
+                async def astream(self, *args, **kwargs):
+                    if self._mode == "timeout":
+                        await asyncio.sleep(5)
+                    elif self._mode == "err":
+                        raise RuntimeError("boom")
+                    yield {"retrieve_context": {}}
+
             for label, mode in (("cancel", "cancel"), ("timeout", "timeout"), ("err", "err")):
                 tid = f"thr_{label}_{uuid.uuid4().hex[:6]}"
                 rid = f"run_{label}_{uuid.uuid4().hex[:6]}"
@@ -809,44 +832,43 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                         """,
                         (rid, tid, mode == "cancel", worker.worker_id),
                     )
-                claimed_err = {
-                    "run_id": rid,
-                    "thread_id": tid,
-                    "tenant_id": "tenant-alpha",
-                    "kind": "start",
-                    "input": {"request_text": "status only check"},
-                    "attempt": 1,
-                    "created_by": "alice",
-                    "creator_roles": frozenset({"engineer"}),
-                    "release_version": "0.1.0+test",
-                    "checkpoint_compat": 1,
-                    "workflow_name": "incident_desk",
-                }
-                if mode == "timeout":
-                    orig_timeout = worker.settings.run_timeout_s
-                    worker.settings.run_timeout_s = 0.0001  # type: ignore[assignment]
-                    try:
-                        await worker._execute_claimed_run(
-                            pool, rds, checkpointer, store, claimed_err
-                        )
-                    finally:
-                        worker.settings.run_timeout_s = orig_timeout
-                elif mode == "err":
-                    # Passing None checkpointer triggers an exception inside graph execution
-                    await worker._execute_claimed_run(
-                        pool, rds, None, store, claimed_err  # type: ignore[arg-type]
-                    )
-                else:
-                    await worker._execute_claimed_run(pool, rds, checkpointer, store, claimed_err)
+                claimed_err = ClaimedRun(
+                    run_id=rid,
+                    thread_id=tid,
+                    tenant_id="tenant-alpha",
+                    kind="start",
+                    input={"request_text": "status only check"},
+                    attempt=1,
+                    created_by="alice",
+                    creator_roles=frozenset({"engineer"}),
+                    release_version="0.1.0+test",
+                    checkpoint_compat=1,
+                    workflow_name="incident_desk",
+                )
+                controlled_worker = RunWorker(
+                    settings=Settings(run_timeout_s=0.05 if mode == "timeout" else 30.0),
+                    worker_id=worker.worker_id,
+                    lease_s=10,
+                    heartbeat_s=0.05,
+                    graph_builder=lambda _m=mode, **_kw: _ControlledGraph(_m),
+                )
+                await controlled_worker._execute_claimed_run(
+                    pool, rds, checkpointer, store, claimed_err
+                )
 
                 async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                     await set_system_rls_bypass(conn)
-                    await cur.execute("SELECT status FROM runs WHERE run_id = %s", (rid,))
-                    st = (await cur.fetchone())[0]
+                    await cur.execute(
+                        "SELECT status, error_category, error_detail FROM runs WHERE run_id = %s",
+                        (rid,),
+                    )
+                    row = await cur.fetchone()
                     if mode == "cancel":
-                        assert st == "cancelled"
+                        assert row == ("cancelled", None, None), row
+                    elif mode == "timeout":
+                        assert row == ("failed", "transient", "run_timeout"), row
                     else:
-                        assert st == "failed"
+                        assert row == ("failed", "fatal", "boom"), row
 
             # 10. incident_desk direct update_ticket + direct timeout reconcile
             direct_store = InMemoryDomainStore()

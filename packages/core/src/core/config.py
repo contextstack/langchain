@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     max_tool_calls: int = 15
     tool_timeout_s: float = 10.0
     max_tool_output_chars: int = 8000
-    run_timeout_s: int = 300
+    run_timeout_s: float = 300.0
     worker_lease_s: int = 30
     worker_heartbeat_s: int = 10
 

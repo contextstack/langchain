@@ -307,7 +307,7 @@ async def test_concurrent_claim_on_same_thread_does_not_raise_unique_violation()
         claimed1, claimed2 = await asyncio.gather(task1, task2)
 
         assert claimed1 is not None
-        assert claimed1["run_id"] == r1
+        assert claimed1.run_id == r1
         assert claimed2 is None
     finally:
         await pool1.close()

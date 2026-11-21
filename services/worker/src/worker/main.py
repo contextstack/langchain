@@ -8,6 +8,8 @@ import json
 import os
 import signal
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import psycopg
@@ -53,6 +55,23 @@ def _classify_terminal_state(vals: dict[str, Any]) -> tuple[str, str, str | None
     return run_st, thread_st, err_cat, final_st
 
 
+@dataclass(frozen=True)
+class ClaimedRun:
+    """Typed payload returned by `_claim_one_run` for deterministic worker execution."""
+
+    run_id: str
+    thread_id: str
+    tenant_id: str
+    kind: str
+    input: dict[str, Any]
+    attempt: int
+    created_by: str
+    creator_roles: frozenset[str]
+    release_version: str
+    checkpoint_compat: int
+    workflow_name: str = "incident_desk"
+
+
 class RunWorker:
     """Executes LangGraph runs claimed via PostgreSQL `FOR UPDATE SKIP LOCKED`."""
 
@@ -64,6 +83,7 @@ class RunWorker:
         lease_s: int | None = None,
         heartbeat_s: float | None = None,
         poll_interval_s: float = 0.5,
+        graph_builder: Callable[..., Any] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.worker_id = worker_id or f"worker-{os.getpid()}-{uuid.uuid4().hex[:6]}"
@@ -74,6 +94,7 @@ class RunWorker:
             os.getenv("WORKER_HEARTBEAT_S", str(self.settings.worker_heartbeat_s))
         )
         self.poll_interval_s = poll_interval_s
+        self._graph_builder = graph_builder
         self._stop = asyncio.Event()
         self._tracer = configure_tracer_provider(
             settings=self.settings, service_name=f"ops-worker-{self.worker_id}"
@@ -304,7 +325,7 @@ class RunWorker:
                     )
             await conn.commit()
 
-    async def _claim_one_run(self, pool: AsyncConnectionPool[Any]) -> dict[str, Any] | None:
+    async def _claim_one_run(self, pool: AsyncConnectionPool[Any]) -> ClaimedRun | None:
         async with pool.connection() as conn:
             await set_system_rls_bypass(conn)
             try:
@@ -398,19 +419,19 @@ class RunWorker:
                 await conn.rollback()
                 return None
 
-        return {
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "tenant_id": tenant_id,
-            "kind": kind,
-            "input": run_input if isinstance(run_input, dict) else json.loads(run_input),
-            "attempt": attempt,
-            "created_by": created_by,
-            "creator_roles": frozenset(creator_roles),
-            "release_version": release_version,
-            "checkpoint_compat": thread_compat,
-            "workflow_name": workflow_name,
-        }
+        return ClaimedRun(
+            run_id=run_id,
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            kind=kind,
+            input=run_input if isinstance(run_input, dict) else json.loads(run_input),
+            attempt=attempt,
+            created_by=created_by,
+            creator_roles=frozenset(creator_roles),
+            release_version=release_version,
+            checkpoint_compat=thread_compat,
+            workflow_name=workflow_name,
+        )
 
     async def _fenced_finalize(
         self,
@@ -516,15 +537,15 @@ class RunWorker:
         rds: aioredis.Redis,
         checkpointer: AsyncPostgresSaver,
         store: AsyncPostgresStore,
-        claimed: dict[str, Any],
+        claimed: ClaimedRun,
     ) -> None:
-        run_id: str = claimed["run_id"]
-        thread_id: str = claimed["thread_id"]
-        tenant_id: str = claimed["tenant_id"]
-        attempt: int = claimed["attempt"]
-        kind: str = claimed["kind"]
-        run_input: dict[str, Any] = claimed["input"]
-        workflow_name: str = claimed.get("workflow_name", "incident_desk")
+        run_id = claimed.run_id
+        thread_id = claimed.thread_id
+        tenant_id = claimed.tenant_id
+        attempt = claimed.attempt
+        kind = claimed.kind
+        run_input = claimed.input
+        workflow_name = claimed.workflow_name
 
         try:
             wf_spec = get_workflow_spec(workflow_name)
@@ -545,14 +566,14 @@ class RunWorker:
 
         # 1. Checkpoint compatibility check (AC-6)
         current_compat = wf_spec.get_checkpoint_compat()
-        if claimed["checkpoint_compat"] != current_compat:
+        if claimed.checkpoint_compat != current_compat:
             async with pool.connection() as conn:
                 await set_tenant_context(conn, tenant_id)
                 await write_audit_event(
                     conn,
                     AuditEvent(
                         tenant_id=tenant_id,
-                        actor_id=claimed["created_by"],
+                        actor_id=claimed.created_by,
                         thread_id=thread_id,
                         run_id=run_id,
                         workflow_version=wf_spec.release_version,
@@ -561,7 +582,7 @@ class RunWorker:
                         step_or_op_key=f"version:{run_id}",
                         attempt=attempt,
                         details={
-                            "thread_compat": claimed["checkpoint_compat"],
+                            "thread_compat": claimed.checkpoint_compat,
                             "worker_compat": current_compat,
                         },
                     ),
@@ -589,12 +610,13 @@ class RunWorker:
             use_mcp_http=(self.settings.mcp_transport == "http"),
             attempt=attempt,
         )
-        graph = wf_spec.build_graph(deps=deps, checkpointer=checkpointer, store=store)
+        builder = self._graph_builder or wf_spec.build_graph
+        graph = builder(deps=deps, checkpointer=checkpointer, store=store)
 
         ctx = RunContext(
             tenant_id=tenant_id,
-            requester_id=claimed["created_by"],
-            requester_roles=claimed["creator_roles"],
+            requester_id=claimed.created_by,
+            requester_roles=claimed.creator_roles,
             thread_id=thread_id,
             run_id=run_id,
             request_id=f"req-{run_id}",
@@ -738,12 +760,12 @@ class RunWorker:
                         conn=conn,
                         domain=domain,
                         tenant_id=tenant_id,
-                        requester_id=claimed["created_by"],
+                        requester_id=claimed.created_by,
                         thread_id=thread_id,
                         run_id=run_id,
                         attempt=attempt,
                         operation_id=op_id,
-                        release_version=claimed["release_version"],
+                        release_version=claimed.release_version,
                         mcp_url=wf_spec.reconcile_mcp_url(self.settings),
                     )
                     await conn.commit()
@@ -842,7 +864,7 @@ class RunWorker:
                     except Exception:
                         await asyncio.sleep(self.poll_interval_s)
         finally:
-            await pubsub.close()
+            await pubsub.aclose()
             await rds.aclose()
             await pool.close()
 
