@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import os
 
 import pytest
 import redis.asyncio as aioredis
 
 from core.config import get_settings
+
+# Explicitly opt in to local dev persona tokens for the test suite (fail-closed in production)
+os.environ.setdefault("ENABLE_DEV_TOKENS", "true")
+get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

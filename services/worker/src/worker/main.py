@@ -17,6 +17,7 @@ import redis.asyncio as aioredis
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.types import Command
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from core.audit import AuditEvent, write_audit_event
@@ -501,25 +502,29 @@ class RunWorker:
     ) -> None:
         while not lost_lease.is_set():
             await asyncio.sleep(self.heartbeat_s)
-            async with pool.connection() as conn:
-                await set_system_rls_bypass(conn)
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        UPDATE runs
-                           SET lease_expires_at = now() + (%s * interval '1 second'),
-                               updated_at = now()
-                         WHERE run_id = %s
-                           AND lease_owner = %s
-                           AND attempt = %s
-                           AND status = 'running'
-                        """,
-                        (self.lease_s, run_id, self.worker_id, attempt),
-                    )
-                    if cur.rowcount == 0:
-                        lost_lease.set()
-                        return
-                await conn.commit()
+            try:
+                async with pool.connection() as conn:
+                    await set_system_rls_bypass(conn)
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            UPDATE runs
+                               SET lease_expires_at = now() + (%s * interval '1 second'),
+                                   updated_at = now()
+                             WHERE run_id = %s
+                               AND lease_owner = %s
+                               AND attempt = %s
+                               AND status = 'running'
+                            """,
+                            (self.lease_s, run_id, self.worker_id, attempt),
+                        )
+                        if cur.rowcount == 0:
+                            lost_lease.set()
+                            return
+                    await conn.commit()
+            except (psycopg.OperationalError, psycopg.InterfaceError):
+                # Transient DB drop: let the next tick retry or let lease expire naturally
+                continue
 
     async def _execute_claimed_run(
         self,
@@ -797,6 +802,10 @@ class RunWorker:
             )
             if committed:
                 await self._publish_event(rds, run_id, "error", {"error": "run_timeout"})
+        except (psycopg.OperationalError, psycopg.InterfaceError):
+            # Transient DB disconnect: do NOT falsely mark the run fatal; let serve_forever
+            # re-open checkpointer/store connections and reclaim once the lease expires.
+            raise
         except Exception as exc:
             committed = await self._fenced_finalize(
                 pool,
@@ -820,6 +829,7 @@ class RunWorker:
             conninfo=self.settings.database_url,
             min_size=2,
             max_size=10,
+            check=AsyncConnectionPool.check_connection,
             open=False,
         )
         await pool.open()
@@ -833,35 +843,53 @@ class RunWorker:
             pubsub_subscribed = False
 
         try:
-            async with (
-                AsyncPostgresSaver.from_conn_string(self.settings.database_url) as checkpointer,
-                AsyncPostgresStore.from_conn_string(self.settings.database_url) as store,
-            ):
-                domain = PostgresDomainStore(self.settings.database_url)
-                sweep_graph = build_incident_desk_graph(
-                    deps=WorkflowDeps(
-                        settings=self.settings, domain_store=domain, use_postgres=True
-                    ),
-                    checkpointer=checkpointer,
-                    store=store,
+            domain = PostgresDomainStore(self.settings.database_url)
+            while not self._stop.is_set():
+                cp_pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+                    conninfo=self.settings.database_url,
+                    min_size=1,
+                    max_size=6,
+                    kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+                    check=AsyncConnectionPool.check_connection,
+                    open=False,
                 )
-                while not self._stop.is_set():
-                    await self._sweep_expired_runs(pool, rds, sweep_graph, domain)
-                    claimed = await self._claim_one_run(pool)
-                    if claimed is not None:
-                        await self._execute_claimed_run(pool, rds, checkpointer, store, claimed)
-                        continue
-                    # Wait briefly for Redis wake-up or degrade cleanly to Postgres polling
-                    if pubsub_subscribed:
-                        try:
-                            await pubsub.get_message(
-                                ignore_subscribe_messages=True, timeout=self.poll_interval_s
+                try:
+                    await cp_pool.open()
+                    checkpointer = AsyncPostgresSaver(cp_pool)
+                    store = AsyncPostgresStore(cp_pool)
+                    sweep_graph = build_incident_desk_graph(
+                        deps=WorkflowDeps(
+                            settings=self.settings, domain_store=domain, use_postgres=True
+                        ),
+                        checkpointer=checkpointer,
+                        store=store,
+                    )
+                    while not self._stop.is_set():
+                        await self._sweep_expired_runs(pool, rds, sweep_graph, domain)
+                        claimed = await self._claim_one_run(pool)
+                        if claimed is not None:
+                            await self._execute_claimed_run(
+                                pool, rds, checkpointer, store, claimed
                             )
-                        except Exception:
-                            pubsub_subscribed = False
+                            continue
+                        # Wait briefly for Redis wake-up or degrade cleanly to Postgres polling
+                        if pubsub_subscribed:
+                            try:
+                                await pubsub.get_message(
+                                    ignore_subscribe_messages=True,
+                                    timeout=self.poll_interval_s,
+                                )
+                            except Exception:
+                                pubsub_subscribed = False
+                                await asyncio.sleep(self.poll_interval_s)
+                        else:
                             await asyncio.sleep(self.poll_interval_s)
-                    else:
+                except (psycopg.OperationalError, psycopg.InterfaceError):
+                    if not self._stop.is_set():
                         await asyncio.sleep(self.poll_interval_s)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await cp_pool.close()
         finally:
             with contextlib.suppress(Exception):
                 await pubsub.aclose()

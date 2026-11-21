@@ -24,13 +24,17 @@ Everything so far runs locally at **\$0 in licences**. All CI tests, offline eva
 - **Evidence Plane (`packages/telemetry`, `evals/`):**
   - OpenTelemetry spans with mandatory PII masking → self-hosted Langfuse (with a zero-code env-var toggle to commercial LangSmith).
   - Separate, DB-enforced append-only PostgreSQL `audit_log` (role grants + trigger).
-  - Offline evaluation suite (`evals/datasets/core.jsonl`) with deterministic ground-truth evaluators and a hand-labeled calibration set (`evals/datasets/calibration.jsonl`).
+  - Offline evaluation suite (`evals/datasets/core.jsonl`) with deterministic ground-truth evaluators and a starter 4-example calibration set (`evals/datasets/calibration.jsonl`).
 
 See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete build-vs-buy breakdown against **LangSmith Platform** and **LangSmith Deployments / Agent Server**, and [docs/adr/0001-oss-control-execution-evidence-architecture.md](./docs/adr/0001-oss-control-execution-evidence-architecture.md) for the full Architecture Decision Record (ADR).
 
 ### What This Reference Proves (and Doesn't)
 - **Proven at \$0 (automated, repeatable):** Crash recovery across real `SIGKILL`/`os._exit(137)` worker kills, exactly-once external mutations under retries and 3 parallel workers, fail-closed PostgreSQL Row-Level Security (RLS), separation of duties, MCP outage resilience, PII masking at the live OTLP/HTTP export boundary, and reusable runtime dispatch across two distinct domains (`incident_desk` and `refund_ops`).
-- **Not proven by the mock suite:** Real-provider LLM planning accuracy. Gateway and judge wiring are verified against local stubs; evaluating real model quality requires running a labeled eval against your target provider via LiteLLM (`MODEL_MODE=gateway`).
+- **Known limits (local reference scope):**
+  - `/v1/dev/token` is disabled by default in code (`ENABLE_DEV_TOKENS=false`) and explicitly opted into in `.env.example` for local demos; replace with a real IdP before any shared deployment.
+  - Redis is best-effort only: during a Redis outage, SSE wake-ups degrade to Postgres polling and the per-tenant rate limiter deliberately fails open to preserve availability.
+  - API and worker share a single `app_rw` DB role in local dev; production deployments should separate API (no RLS bypass) from worker queue roles and add RLS on LangGraph checkpoint/store tables.
+  - Real-provider LLM planning quality and broader PII detectors (SSNs, JWTs, unseparated phone numbers) are scoped outside this \$0 local reference.
 
 ---
 

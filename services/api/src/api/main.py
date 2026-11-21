@@ -59,8 +59,6 @@ DEV_PERSONAS: dict[str, CallerIdentity] = {
 
 class CreateThreadRequest(BaseModel):
     workflow_name: str = "incident_desk"
-    release_version: str = "0.1.0+dev"
-    checkpoint_compat: int = 1
 
 
 class StartRunRequest(BaseModel):
@@ -92,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             conninfo=cfg.database_url,
             min_size=2,
             max_size=10,
+            check=AsyncConnectionPool.check_connection,
             open=False,
         )
         await pool.open()

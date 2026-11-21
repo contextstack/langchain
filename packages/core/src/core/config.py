@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     database_admin_url: str = "postgresql://postgres:postgres@127.0.0.1:5439/contextstack"
     redis_url: str = "redis://127.0.0.1:6389/0"
 
-    # Auth & MCP (>=32 bytes for HS256)
+    # Auth & MCP (>=32 bytes for HS256); dev persona tokens are opt-in (fail-closed by default)
     jwt_signing_secret: str = "dev-only-jwt-secret-key-at-least-32-bytes-long"
     mcp_token_secret: str = "dev-only-mcp-secret-key-at-least-32-bytes-long"
-    enable_dev_tokens: bool = True
+    enable_dev_tokens: bool = False
     mcp_infra_url: str = "http://127.0.0.1:8101/mcp"
     mcp_ticketing_url: str = "http://127.0.0.1:8102/mcp"
     mcp_billing_url: str = "http://127.0.0.1:8103/mcp"
