@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 from core.audit import AuditEvent, write_audit_event
 from core.auth import mint_mcp_token
 from core.config import Settings, get_settings
+from core.db import set_system_rls_bypass, set_tenant_context
 from core.models import RunContext
 from mcp_servers.domain_store import PostgresDomainStore
 from telemetry.tracing import (
@@ -183,6 +184,7 @@ class RunWorker:
     ) -> None:
         """Finalize expired runs that exhausted max_attempts or had cancel_requested=true."""
         async with pool.connection() as conn:
+            await set_system_rls_bypass(conn)
             async with conn.cursor() as cur:
                 # 1. Exhausted attempts
                 await cur.execute(
@@ -294,6 +296,7 @@ class RunWorker:
 
     async def _claim_one_run(self, pool: AsyncConnectionPool[Any]) -> dict[str, Any] | None:
         async with pool.connection() as conn:
+            await set_system_rls_bypass(conn)
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
@@ -385,6 +388,7 @@ class RunWorker:
     ) -> bool:
         """Fenced DB transition: only commits if this worker still holds (lease_owner, attempt)."""
         async with pool.connection() as conn:
+            await set_system_rls_bypass(conn)
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
@@ -419,7 +423,8 @@ class RunWorker:
         return True
 
     async def _is_cancel_requested(self, pool: AsyncConnectionPool[Any], run_id: str) -> bool:
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_system_rls_bypass(conn)
             await cur.execute("SELECT cancel_requested FROM runs WHERE run_id = %s", (run_id,))
             row = await cur.fetchone()
             return bool(row and row[0])
@@ -435,6 +440,7 @@ class RunWorker:
         while not lost_lease.is_set():
             await asyncio.sleep(self.heartbeat_s)
             async with pool.connection() as conn:
+                await set_system_rls_bypass(conn)
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -472,6 +478,7 @@ class RunWorker:
         current_compat = get_checkpoint_compat()
         if claimed["checkpoint_compat"] != current_compat:
             async with pool.connection() as conn:
+                await set_tenant_context(conn, tenant_id)
                 await write_audit_event(
                     conn,
                     AuditEvent(
@@ -657,6 +664,7 @@ class RunWorker:
             op_id = (post_snap.values or {}).get("operation_id") if post_snap else None
             if op_id:
                 async with pool.connection() as conn:
+                    await set_tenant_context(conn, tenant_id)
                     r_st, t_st, err_cat, rec = await self._reconcile_in_flight_write(
                         conn=conn,
                         domain=domain,

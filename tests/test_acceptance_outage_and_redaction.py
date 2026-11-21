@@ -62,9 +62,7 @@ async def test_mcp_outage_during_cancel_reconciliation_does_not_block_worker() -
         await conn.execute(
             "TRUNCATE TABLE runs, approvals, app_threads, mock_operations RESTART IDENTITY CASCADE;"
         )
-    async with await psycopg.AsyncConnection.connect(
-        settings.database_url, autocommit=True
-    ) as conn:
+    async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
         await seed_knowledge_and_domain(conn, embeddings=DeterministicMockEmbeddings())
 
     pg_store = PostgresDomainStore(settings.database_url)

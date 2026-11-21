@@ -25,6 +25,7 @@ from langgraph.types import interrupt
 from core.audit import AuditEvent, write_audit_event
 from core.auth import mint_mcp_token
 from core.config import Settings, get_settings
+from core.db import set_tenant_context
 from core.models import ChangePlan, RunbookCitation, RunContext
 from core.pii import API_KEY_PATTERN, EMAIL_PATTERN, PHONE_PATTERN, redact_obj, redact_text
 from core.policy import PolicyDecision, PolicyEngine
@@ -263,9 +264,11 @@ def build_incident_desk_graph(
 
     async def _record_audit(event: AuditEvent) -> None:
         if wf_deps.use_postgres:
-            async with await psycopg.AsyncConnection.connect(
-                wf_deps.settings.database_url, autocommit=True
-            ) as conn:
+            async with (
+                await psycopg.AsyncConnection.connect(wf_deps.settings.database_url) as conn,
+                conn.transaction(),
+            ):
+                await set_tenant_context(conn, event.tenant_id)
                 await write_audit_event(conn, event)
         else:
             wf_deps.audit_memory.append(event)
@@ -494,9 +497,11 @@ def build_incident_desk_graph(
         plan_hash = plan.plan_hash()
 
         if wf_deps.use_postgres:
-            async with await psycopg.AsyncConnection.connect(
-                wf_deps.settings.database_url, autocommit=True
-            ) as conn:
+            async with (
+                await psycopg.AsyncConnection.connect(wf_deps.settings.database_url) as conn,
+                conn.transaction(),
+            ):
+                await set_tenant_context(conn, ctx.tenant_id)
                 await conn.execute(
                     """
                     INSERT INTO approvals

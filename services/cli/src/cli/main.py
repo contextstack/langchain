@@ -103,9 +103,7 @@ def seed() -> None:
     async def _seed() -> dict[str, int]:
         settings = get_settings()
         embeddings = DeterministicMockEmbeddings()
-        async with await psycopg.AsyncConnection.connect(
-            settings.database_url, autocommit=True
-        ) as conn:
+        async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
             return await seed_knowledge_and_domain(conn, embeddings=embeddings)
 
     counts = asyncio.run(_seed())

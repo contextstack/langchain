@@ -8,6 +8,7 @@ from typing import Any
 
 import psycopg
 
+from core.db import set_tenant_context
 from knowledge.fixtures import SEED_SERVICES, SEED_TICKETS
 
 
@@ -206,8 +207,10 @@ class PostgresDomainStore:
     async def get_service_status(self, *, tenant_id: str, service_name: str) -> dict[str, Any]:
         async with (
             await psycopg.AsyncConnection.connect(self._dsn) as conn,
+            conn.transaction(),
             conn.cursor() as cur,
         ):
+            await set_tenant_context(conn, tenant_id)
             await cur.execute(
                 """
                 SELECT tenant_id, service_name, current_version, status
@@ -242,8 +245,10 @@ class PostgresDomainStore:
     async def get_operation_status(self, *, tenant_id: str, operation_id: str) -> dict[str, Any]:
         async with (
             await psycopg.AsyncConnection.connect(self._dsn) as conn,
+            conn.transaction(),
             conn.cursor() as cur,
         ):
+            await set_tenant_context(conn, tenant_id)
             await cur.execute(
                 """
                 SELECT status, resource_type, resource_id, action, result_payload
@@ -288,6 +293,7 @@ class PostgresDomainStore:
             conn.transaction(),
             conn.cursor() as cur,
         ):
+            await set_tenant_context(conn, tenant_id)
             await cur.execute(
                 """
                 SELECT tenant_id, request_hash, result_payload
@@ -367,8 +373,10 @@ class PostgresDomainStore:
     async def get_ticket(self, *, tenant_id: str, ticket_id: str) -> dict[str, Any]:
         async with (
             await psycopg.AsyncConnection.connect(self._dsn) as conn,
+            conn.transaction(),
             conn.cursor() as cur,
         ):
+            await set_tenant_context(conn, tenant_id)
             await cur.execute(
                 """
                 SELECT tenant_id, ticket_id, service_name, title, status, notes
@@ -414,6 +422,7 @@ class PostgresDomainStore:
             conn.transaction(),
             conn.cursor() as cur,
         ):
+            await set_tenant_context(conn, tenant_id)
             await cur.execute(
                 """
                 SELECT tenant_id, request_hash, result_payload

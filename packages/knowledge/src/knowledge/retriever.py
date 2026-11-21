@@ -9,6 +9,7 @@ from langchain_core.embeddings import Embeddings
 from psycopg import AsyncConnection
 from pydantic import BaseModel
 
+from core.db import set_system_rls_bypass, set_tenant_context
 from knowledge.fixtures import SEED_RUNBOOKS, SEED_SERVICES, SEED_TICKETS
 
 
@@ -33,11 +34,12 @@ async def retrieve_runbooks(
     query: str,
     limit: int = 4,
 ) -> list[RetrievedRunbook]:
-    """Query kb_documents with mandatory SQL-level tenant_id AND allowed_roles filtering."""
+    """Query kb_documents with BOTH Postgres RLS and SQL-level tenant_id + role filtering."""
     if not roles:
         return []
     query_vec = format_pgvector(embeddings.embed_query(query))
-    async with conn.cursor() as cur:
+    async with conn.transaction(), conn.cursor() as cur:
+        await set_tenant_context(conn, tenant_id)
         await cur.execute(
             """
             SELECT doc_id, title, content, metadata, (embedding <=> %s::vector) AS distance
@@ -68,66 +70,68 @@ async def seed_knowledge_and_domain(
     embeddings: Embeddings,
 ) -> dict[str, int]:
     """Idempotently seed runbooks, mock services, and mock tickets."""
-    for rb in SEED_RUNBOOKS:
-        vec = format_pgvector(embeddings.embed_query(f"{rb.title}\n{rb.content}"))
-        await conn.execute(
-            """
-            INSERT INTO kb_documents
-                (doc_id, tenant_id, allowed_roles, title, content, embedding, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s::vector, %s::jsonb)
-            ON CONFLICT (doc_id) DO UPDATE SET
-                tenant_id = EXCLUDED.tenant_id,
-                allowed_roles = EXCLUDED.allowed_roles,
-                title = EXCLUDED.title,
-                content = EXCLUDED.content,
-                embedding = EXCLUDED.embedding,
-                metadata = EXCLUDED.metadata
-            """,
-            (
-                rb.doc_id,
-                rb.tenant_id,
-                rb.allowed_roles,
-                rb.title,
-                rb.content,
-                vec,
-                json.dumps(rb.metadata),
-            ),
-        )
+    async with conn.transaction():
+        await set_system_rls_bypass(conn)
+        for rb in SEED_RUNBOOKS:
+            vec = format_pgvector(embeddings.embed_query(f"{rb.title}\n{rb.content}"))
+            await conn.execute(
+                """
+                INSERT INTO kb_documents
+                    (doc_id, tenant_id, allowed_roles, title, content, embedding, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s::vector, %s::jsonb)
+                ON CONFLICT (doc_id) DO UPDATE SET
+                    tenant_id = EXCLUDED.tenant_id,
+                    allowed_roles = EXCLUDED.allowed_roles,
+                    title = EXCLUDED.title,
+                    content = EXCLUDED.content,
+                    embedding = EXCLUDED.embedding,
+                    metadata = EXCLUDED.metadata
+                """,
+                (
+                    rb.doc_id,
+                    rb.tenant_id,
+                    rb.allowed_roles,
+                    rb.title,
+                    rb.content,
+                    vec,
+                    json.dumps(rb.metadata),
+                ),
+            )
 
-    for svc in SEED_SERVICES:
-        await conn.execute(
-            """
-            INSERT INTO mock_services (tenant_id, service_name, current_version, status)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (tenant_id, service_name) DO UPDATE SET
-                current_version = EXCLUDED.current_version,
-                status = EXCLUDED.status,
-                updated_at = now()
-            """,
-            (svc.tenant_id, svc.service_name, svc.current_version, svc.status),
-        )
+        for svc in SEED_SERVICES:
+            await conn.execute(
+                """
+                INSERT INTO mock_services (tenant_id, service_name, current_version, status)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (tenant_id, service_name) DO UPDATE SET
+                    current_version = EXCLUDED.current_version,
+                    status = EXCLUDED.status,
+                    updated_at = now()
+                """,
+                (svc.tenant_id, svc.service_name, svc.current_version, svc.status),
+            )
 
-    for ticket in SEED_TICKETS:
-        await conn.execute(
-            """
-            INSERT INTO mock_tickets (tenant_id, ticket_id, service_name, title, status, notes)
-            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-            ON CONFLICT (tenant_id, ticket_id) DO UPDATE SET
-                service_name = EXCLUDED.service_name,
-                title = EXCLUDED.title,
-                status = EXCLUDED.status,
-                notes = EXCLUDED.notes,
-                updated_at = now()
-            """,
-            (
-                ticket.tenant_id,
-                ticket.ticket_id,
-                ticket.service_name,
-                ticket.title,
-                ticket.status,
-                json.dumps(ticket.notes),
-            ),
-        )
+        for ticket in SEED_TICKETS:
+            await conn.execute(
+                """
+                INSERT INTO mock_tickets (tenant_id, ticket_id, service_name, title, status, notes)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (tenant_id, ticket_id) DO UPDATE SET
+                    service_name = EXCLUDED.service_name,
+                    title = EXCLUDED.title,
+                    status = EXCLUDED.status,
+                    notes = EXCLUDED.notes,
+                    updated_at = now()
+                """,
+                (
+                    ticket.tenant_id,
+                    ticket.ticket_id,
+                    ticket.service_name,
+                    ticket.title,
+                    ticket.status,
+                    json.dumps(ticket.notes),
+                ),
+            )
 
     return {
         "runbooks": len(SEED_RUNBOOKS),

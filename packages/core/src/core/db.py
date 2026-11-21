@@ -161,10 +161,57 @@ TO app_rw;
 
 REVOKE ALL ON audit_log FROM app_rw;
 GRANT SELECT, INSERT ON audit_log TO app_rw;
+
+-- Row-Level Security (RLS) defense-in-depth on all tenant-scoped tables.
+-- Fail-closed by default: app_rw sees 0 rows unless `app.current_tenant` matches
+-- or a system queue/seed transaction explicitly sets `app.bypass_rls = 'on'`.
+DO $$
+DECLARE
+    tbl TEXT;
+BEGIN
+    FOREACH tbl IN ARRAY ARRAY[
+        'app_threads',
+        'runs',
+        'approvals',
+        'kb_documents',
+        'mock_services',
+        'mock_tickets',
+        'mock_operations',
+        'audit_log'
+    ]
+    LOOP
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', tbl);
+        EXECUTE format(
+            'CREATE POLICY tenant_isolation ON %I FOR ALL TO app_rw '
+            'USING ('
+            '  current_setting(''app.bypass_rls'', true) = ''on'' '
+            '  OR tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')'
+            ') '
+            'WITH CHECK ('
+            '  current_setting(''app.bypass_rls'', true) = ''on'' '
+            '  OR tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')'
+            ')',
+            tbl
+        );
+    END LOOP;
+END
+$$;
 """
 
 
+async def set_tenant_context(conn: psycopg.AsyncConnection, tenant_id: str) -> None:
+    """Bind transaction-local tenant_id for PostgreSQL Row-Level Security."""
+    await conn.execute("SELECT set_config('app.current_tenant', %s, true)", (tenant_id,))
+
+
+async def set_system_rls_bypass(conn: psycopg.AsyncConnection) -> None:
+    """Enable transaction-local RLS bypass ONLY for cross-tenant worker queue/seed ops."""
+    await conn.execute("SELECT set_config('app.bypass_rls', 'on', true)")
+
+
 async def apply_app_migrations(admin_dsn: str) -> None:
-    """Apply application DDL, append-only trigger, and role grants using admin credentials."""
+    """Apply application DDL, append-only trigger, RLS policies, and role grants."""
     async with await psycopg.AsyncConnection.connect(admin_dsn, autocommit=True) as conn:
         await conn.execute(SCHEMA_DDL)

@@ -16,7 +16,7 @@ import psycopg
 from api.main import create_app
 from core.auth import mint_user_jwt
 from core.config import get_settings
-from core.db import apply_app_migrations
+from core.db import apply_app_migrations, set_system_rls_bypass
 from core.models import CallerIdentity
 from evals.runner import run_eval_suite
 from gateway.mocks import DeterministicMockEmbeddings
@@ -34,9 +34,7 @@ async def _reset_db() -> None:
             TRUNCATE TABLE runs, approvals, app_threads, mock_operations RESTART IDENTITY CASCADE;
             """
         )
-    async with await psycopg.AsyncConnection.connect(
-        settings.database_url, autocommit=True
-    ) as conn:
+    async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
         await seed_knowledge_and_domain(conn, embeddings=DeterministicMockEmbeddings())
 
 
@@ -97,8 +95,10 @@ async def _count_mock_ops() -> int:
     settings = get_settings()
     async with (
         await psycopg.AsyncConnection.connect(settings.database_url) as conn,
+        conn.transaction(),
         conn.cursor() as cur,
     ):
+        await set_system_rls_bypass(conn)
         await cur.execute("SELECT COUNT(*) FROM mock_operations")
         row = await cur.fetchone()
         return int(row[0]) if row else 0

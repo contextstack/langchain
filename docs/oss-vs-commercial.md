@@ -27,7 +27,7 @@ Enterprise buyers often assume buying an enterprise AI platform solves security 
 2. **External Side-Effect Idempotency & Reconciliation:** Checkpointing only gives **at-least-once** execution. You still must persist an `operation_id` synchronously (`durability="sync"`) *before* any external write, send it as an idempotency key, reject payload mismatches, and reconcile `outcome_unknown` / cancel-after-write states.
 3. **Human Governance & Separation of Duties:** Enforcing that a requester cannot approve their own change (`CHECK` constraint + API check), gating approvals on durable pauses, re-validating edited plans, and verifying `approved_plan_hash` before execution.
 4. **Authoritative Audit Logging vs. Debug Traces:** Traces are high-volume debugging data (and must be PII-masked before export). Compliance requires a compact, DB-enforced append-only `audit_log` recording who requested, who approved, and what mutated.
-5. **Production Hardening Beyond v1:** Adding PostgreSQL **Row-Level Security (RLS)** as defense-in-depth, HA ClickHouse/Postgres clustering, secrets rotation (Vault/KMS), and rainbow deployments for zero-downtime `checkpoint_compat` migrations.
+5. **Production Hardening Beyond v2.1:** While this repo now enforces PostgreSQL **Row-Level Security (RLS)** on all 8 tenant-scoped tables (fail-closed by default via transaction-local `app.current_tenant`), production deployments still need HA ClickHouse/Postgres clustering, secrets rotation (Vault/KMS), and rainbow deployments for zero-downtime `checkpoint_compat` migrations.
 
 ---
 

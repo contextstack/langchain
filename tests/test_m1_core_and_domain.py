@@ -16,7 +16,7 @@ from core.auth import (
     verify_user_jwt,
 )
 from core.config import get_settings
-from core.db import apply_app_migrations
+from core.db import apply_app_migrations, set_tenant_context
 from core.models import CallerIdentity, ChangePlan, RunbookCitation, RunContext, ToolContract
 from core.pii import redact_obj, redact_text
 from core.policy import PolicyDecision, PolicyEngine
@@ -323,9 +323,7 @@ async def test_postgres_migrations_ac12_append_only_and_acl_rag() -> None:
 
     # Seed using app_rw
     embeddings = DeterministicMockEmbeddings()
-    async with await psycopg.AsyncConnection.connect(
-        settings.database_url, autocommit=True
-    ) as conn:
+    async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
         counts = await seed_knowledge_and_domain(conn, embeddings=embeddings)
         assert counts["runbooks"] == 5
 
@@ -354,19 +352,25 @@ async def test_postgres_migrations_ac12_append_only_and_acl_rag() -> None:
             decision="allow",
             step_or_op_key="ac12-check",
         )
-        event_id = await write_audit_event(conn, ev)
+        async with conn.transaction():
+            await set_tenant_context(conn, "tenant-alpha")
+            event_id = await write_audit_event(conn, ev)
 
         with pytest.raises(psycopg.Error):
-            await conn.execute(
-                "UPDATE audit_log SET decision = 'deny' WHERE event_id = %s",
-                (event_id,),
-            )
+            async with conn.transaction():
+                await set_tenant_context(conn, "tenant-alpha")
+                await conn.execute(
+                    "UPDATE audit_log SET decision = 'deny' WHERE event_id = %s",
+                    (event_id,),
+                )
 
         with pytest.raises(psycopg.Error):
-            await conn.execute(
-                "DELETE FROM audit_log WHERE event_id = %s",
-                (event_id,),
-            )
+            async with conn.transaction():
+                await set_tenant_context(conn, "tenant-alpha")
+                await conn.execute(
+                    "DELETE FROM audit_log WHERE event_id = %s",
+                    (event_id,),
+                )
 
     # Live PostgresDomainStore idempotency check
     pg_store = PostgresDomainStore(settings.database_url)

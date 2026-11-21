@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from core.audit import AuditEvent, write_audit_event
 from core.auth import AuthError, mint_user_jwt, verify_user_jwt
 from core.config import Settings, get_settings
+from core.db import set_tenant_context
 from core.models import CallerIdentity, ChangePlan
 from core.policy import PolicyDecision, PolicyEngine
 
@@ -173,7 +174,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         thread_id = f"thr_{uuid.uuid4().hex[:16]}"
         pool: AsyncConnectionPool[Any] = request.app.state.pool
-        async with pool.connection() as conn:
+        async with pool.connection() as conn, conn.transaction():
+            await set_tenant_context(conn, caller.tenant_id)
             await conn.execute(
                 """
                 INSERT INTO app_threads
@@ -191,7 +193,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     body.checkpoint_compat,
                 ),
             )
-            await conn.commit()
         return {
             "thread_id": thread_id,
             "tenant_id": caller.tenant_id,
@@ -205,7 +206,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         caller: CallerIdentity = Depends(get_caller),  # noqa: B008
     ) -> list[dict[str, Any]]:
         pool: AsyncConnectionPool[Any] = request.app.state.pool
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             await cur.execute(
                 """
                 SELECT thread_id, tenant_id, created_by, workflow_name,
@@ -248,7 +250,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rds: aioredis.Redis = request.app.state.redis
         run_id = f"run_{uuid.uuid4().hex[:16]}"
 
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             await cur.execute(
                 "SELECT tenant_id, status FROM app_threads WHERE thread_id = %s FOR UPDATE",
                 (thread_id,),
@@ -278,7 +281,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                 )
             except psycopg.errors.UniqueViolation as exc:
-                await conn.rollback()
                 raise HTTPException(
                     status_code=409,
                     detail="Thread already has an active run",
@@ -289,7 +291,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "WHERE thread_id = %s",
                 (thread_id,),
             )
-            await conn.commit()
 
         await rds.publish(WAKEUP_CHANNEL, run_id)
         return {"run_id": run_id, "thread_id": thread_id, "status": "queued"}
@@ -301,7 +302,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         caller: CallerIdentity = Depends(get_caller),  # noqa: B008
     ) -> dict[str, Any]:
         pool: AsyncConnectionPool[Any] = request.app.state.pool
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             await cur.execute(
                 """
                 SELECT r.run_id, r.thread_id, r.tenant_id, r.kind, r.status,
@@ -337,7 +339,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         caller: CallerIdentity = Depends(get_caller),  # noqa: B008
     ) -> StreamingResponse:
         pool: AsyncConnectionPool[Any] = request.app.state.pool
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             await cur.execute("SELECT tenant_id FROM runs WHERE run_id = %s", (run_id,))
             row = await cur.fetchone()
         if row is None or row[0] != caller.tenant_id:
@@ -364,7 +367,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 return
                 else:
                     # Check if run already reached terminal state
-                    async with pool.connection() as conn, conn.cursor() as cur:
+                    async with (
+                        pool.connection() as conn,
+                        conn.transaction(),
+                        conn.cursor() as cur,
+                    ):
+                        await set_tenant_context(conn, caller.tenant_id)
                         await cur.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,))
                         st_row = await cur.fetchone()
                     if st_row and st_row[0] in {
@@ -390,7 +398,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pool: AsyncConnectionPool[Any] = request.app.state.pool
         rds: aioredis.Redis = request.app.state.redis
 
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             await cur.execute(
                 "SELECT tenant_id, thread_id, status, kind FROM runs WHERE run_id = %s FOR UPDATE",
                 (run_id,),
@@ -420,7 +429,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "WHERE thread_id = %s",
                     (next_thread_status, thread_id),
                 )
-                await conn.commit()
                 return {
                     "run_id": run_id,
                     "status": "cancelled",
@@ -434,11 +442,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "WHERE run_id = %s",
                     (run_id,),
                 )
-                await conn.commit()
                 await rds.publish(CANCEL_CHANNEL, run_id)
                 return {"run_id": run_id, "status": "running", "cancel_requested": True}
 
-            await conn.commit()
             return {"run_id": run_id, "status": run_status, "cancel_requested": False}
 
     # ------------------------------------------------------------------
@@ -453,7 +459,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="ops-approver role required")
 
         pool: AsyncConnectionPool[Any] = request.app.state.pool
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             # v1.3: only actionable when app_threads.status == 'awaiting_approval'
             await cur.execute(
                 """
@@ -496,6 +503,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resume_run_id = f"run_{uuid.uuid4().hex[:16]}"
 
         async with pool.connection() as conn, conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             await cur.execute(
                 """
                 SELECT a.thread_id, a.tenant_id, a.requested_by, a.operation_id,
@@ -658,7 +666,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         caller: CallerIdentity = Depends(get_caller),  # noqa: B008
     ) -> list[dict[str, Any]]:
         pool: AsyncConnectionPool[Any] = request.app.state.pool
-        async with pool.connection() as conn, conn.cursor() as cur:
+        async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await set_tenant_context(conn, caller.tenant_id)
             if thread_id:
                 await cur.execute(
                     """

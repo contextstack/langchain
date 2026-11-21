@@ -17,7 +17,7 @@ import uvicorn
 from api.main import create_app
 from core.auth import mint_mcp_token, mint_user_jwt
 from core.config import get_settings
-from core.db import apply_app_migrations
+from core.db import apply_app_migrations, set_system_rls_bypass
 from core.models import CallerIdentity
 from gateway.mocks import DeterministicMockEmbeddings
 from knowledge.retriever import seed_knowledge_and_domain
@@ -188,9 +188,7 @@ async def test_e2e_api_worker_authenticated_mcp_http_crash_recovery_verified() -
         await conn.execute(
             "TRUNCATE TABLE runs, approvals, app_threads, mock_operations RESTART IDENTITY CASCADE;"
         )
-    async with await psycopg.AsyncConnection.connect(
-        settings.database_url, autocommit=True
-    ) as conn:
+    async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
         await seed_knowledge_and_domain(conn, embeddings=DeterministicMockEmbeddings())
 
     pg_store = PostgresDomainStore(settings.database_url)
@@ -347,8 +345,10 @@ async def test_e2e_api_worker_authenticated_mcp_http_crash_recovery_verified() -
             assert svc["status"] == "healthy"
             async with (
                 await psycopg.AsyncConnection.connect(settings.database_url) as conn,
+                conn.transaction(),
                 conn.cursor() as cur,
             ):
+                await set_system_rls_bypass(conn)
                 await cur.execute("SELECT COUNT(*) FROM mock_operations")
                 count_row = await cur.fetchone()
                 assert count_row is not None and count_row[0] == 1
