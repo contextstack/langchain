@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import Generation, LLMResult
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
@@ -15,7 +16,44 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcess
 
 from core.config import Settings, get_settings
 from core.models import RunContext
+from core.pii import redact_text
 from telemetry.masking import PIISpanProcessor, mask_export_payload
+
+
+def _redact_error(error: BaseException) -> BaseException:
+    masked = redact_text(str(error))
+    try:
+        return type(error)(masked)
+    except Exception:
+        return RuntimeError(masked)
+
+
+def _redact_llm_result(response: Any) -> Any:
+    if not isinstance(response, LLMResult):
+        return mask_export_payload(response)
+    masked_gens: list[list[Any]] = []
+    for gen_list in response.generations:
+        row: list[Any] = []
+        for g in gen_list:
+            if hasattr(g, "message") and getattr(g, "message", None) is not None:
+                msg = g.message
+                new_content = mask_export_payload(getattr(msg, "content", ""))
+                new_msg = msg.model_copy(update={"content": new_content})
+                row.append(
+                    g.model_copy(
+                        update={"text": redact_text(getattr(g, "text", "")), "message": new_msg}
+                    )
+                )
+            elif isinstance(g, Generation):
+                row.append(g.model_copy(update={"text": redact_text(g.text)}))
+            else:
+                row.append(mask_export_payload(g))
+        masked_gens.append(row)
+    return LLMResult(
+        generations=masked_gens,
+        llm_output=mask_export_payload(response.llm_output),
+        run=response.run,
+    )
 
 
 class RedactingCallbackProxy(BaseCallbackHandler):
@@ -66,6 +104,18 @@ class RedactingCallbackProxy(BaseCallbackHandler):
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> Any:
         return self._inner.on_tool_end(mask_export_payload(output), **kwargs)
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
+        return self._inner.on_llm_end(_redact_llm_result(response), **kwargs)
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> Any:
+        return self._inner.on_llm_error(_redact_error(error), **kwargs)
+
+    def on_chain_error(self, error: BaseException, **kwargs: Any) -> Any:
+        return self._inner.on_chain_error(_redact_error(error), **kwargs)
+
+    def on_tool_error(self, error: BaseException, **kwargs: Any) -> Any:
+        return self._inner.on_tool_error(_redact_error(error), **kwargs)
 
 
 def build_trace_attributes(

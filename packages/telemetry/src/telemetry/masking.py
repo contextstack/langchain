@@ -24,14 +24,25 @@ class PIISpanProcessor(SpanProcessor):
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
         self._scrub_span(span)
 
-    def _scrub_span(self, span: Span | ReadableSpan) -> None:
-        attrs = getattr(span, "_attributes", None)
+    def _scrub_attrs(self, attrs: Any) -> None:
         if attrs is None:
             return
         backing = getattr(attrs, "_dict", attrs)
         if isinstance(backing, dict):
             for key in list(backing.keys()):
                 backing[key] = _mask_attribute_value(backing[key])
+
+    def _scrub_span(self, span: Span | ReadableSpan) -> None:
+        raw_name = getattr(span, "_name", None)
+        if isinstance(raw_name, str):
+            span._name = redact_text(raw_name)  # type: ignore[union-attr]
+        self._scrub_attrs(getattr(span, "_attributes", None))
+        events = getattr(span, "_events", None) or ()
+        for ev in events:
+            ev_name = getattr(ev, "_name", None)
+            if isinstance(ev_name, str):
+                ev._name = redact_text(ev_name)
+            self._scrub_attrs(getattr(ev, "_attributes", None))
 
     def on_end(self, span: ReadableSpan) -> None:
         self._scrub_span(span)

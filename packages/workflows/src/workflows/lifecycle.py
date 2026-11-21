@@ -32,12 +32,12 @@ from core.db import set_tenant_context
 from core.models import ChangePlan, RunContext
 from core.pii import API_KEY_PATTERN, EMAIL_PATTERN, PHONE_PATTERN, redact_obj, redact_text
 from core.policy import PolicyDecision, PolicyEngine
+from core.workflow_catalog import PROPOSE_PLAN_PROMPT_TEMPLATE
 from gateway.factory import get_chat_model, get_embeddings
 from knowledge.fixtures import SEED_RUNBOOKS
 from knowledge.retriever import retrieve_runbooks
 from mcp_servers.domain_store import DomainStore, InMemoryDomainStore, PostgresDomainStore
 from workflows.incident_desk.state import IncidentDeskState
-from workflows.spec_constants import PROPOSE_PLAN_PROMPT_TEMPLATE
 from workflows.tool_executor import ToolExecutor, WriteSpec
 
 
@@ -191,6 +191,17 @@ def build_governed_workflow_graph(
             "release_version": hooks.release_version,
             "retrieved_runbooks": runbooks,
             "prior_memories": prior_memories,
+            # Reset per-run fields so reused threads never leak stale state from prior runs
+            "investigation_summary": "",
+            "change_plan": None,
+            "policy_decision": None,
+            "operation_id": None,
+            "approval_decision": None,
+            "approved_plan_hash": None,
+            "execution_result": None,
+            "verification_passed": None,
+            "final_status": None,
+            "error_category": None,
         }
 
     # Node 2: investigate (LangChain v1 create_agent + Middleware, read-only tools ONLY)

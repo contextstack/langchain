@@ -277,13 +277,19 @@
           container.innerHTML = `<p class="muted">No pending approvals.</p>`;
           return;
         }
-        container.innerHTML = "";
+        container.textContent = "";
         for (const item of items) {
           const div = document.createElement("div");
           div.className = "approval-item";
-          const cites = (item.plan.citations || [])
-            .map((c) => `<li><code>${c.doc_id}</code> — ${c.title}</li>`)
-            .join("");
+
+          const header = document.createElement("div");
+          const idStrong = document.createElement("strong");
+          idStrong.textContent = item.approval_id;
+          const byPill = document.createElement("span");
+          byPill.className = "pill";
+          byPill.textContent = `by ${item.requested_by}`;
+          header.append(idStrong, " ", byPill);
+
           const isRefund = item.plan.action === "issue_refund";
           const amountInfo = isRefund && item.plan.amount_cents
             ? ` ($${(item.plan.amount_cents / 100).toFixed(2)})`
@@ -292,24 +298,59 @@
           const editPayload = isRefund
             ? { amount_cents: 10000 }
             : { action: "restart", target_version: null };
-          div.innerHTML = `
-            <div><strong>${item.approval_id}</strong> <span class="pill">by ${item.requested_by}</span></div>
-            <div class="muted" style="margin:6px 0;">
-              Action: <strong>${item.plan.action}${amountInfo}</strong> on <code>${item.plan.target_resource}</code>
-              (risk: ${item.plan.risk_level})
-            </div>
-            <div>${item.plan.summary || ""}</div>
-            <div class="muted" style="margin-top:6px;">Cited Runbooks:<ul>${cites || "<li>none</li>"}</ul></div>
-            <div class="row">
-              <button class="ok" data-act="approve">Approve</button>
-              <button class="secondary" data-act="edit">${editLabel}</button>
-              <button class="danger" data-act="reject">Reject</button>
-            </div>
-          `;
-          div.querySelector('[data-act="approve"]').onclick = () => decide(item.approval_id, "approve");
-          div.querySelector('[data-act="edit"]').onclick = () =>
-            decide(item.approval_id, "edit", editPayload);
-          div.querySelector('[data-act="reject"]').onclick = () => decide(item.approval_id, "reject");
+
+          const meta = document.createElement("div");
+          meta.className = "muted";
+          meta.style.margin = "6px 0";
+          const actStrong = document.createElement("strong");
+          actStrong.textContent = `${item.plan.action}${amountInfo}`;
+          const targetCode = document.createElement("code");
+          targetCode.textContent = item.plan.target_resource || "";
+          meta.append("Action: ", actStrong, " on ", targetCode, ` (risk: ${item.plan.risk_level})`);
+
+          const summaryDiv = document.createElement("div");
+          summaryDiv.textContent = item.plan.summary || "";
+
+          const citesWrap = document.createElement("div");
+          citesWrap.className = "muted";
+          citesWrap.style.marginTop = "6px";
+          citesWrap.append("Cited Runbooks:");
+          const ul = document.createElement("ul");
+          const citations = item.plan.citations || [];
+          if (!citations.length) {
+            const li = document.createElement("li");
+            li.textContent = "none";
+            ul.appendChild(li);
+          } else {
+            for (const c of citations) {
+              const li = document.createElement("li");
+              const code = document.createElement("code");
+              code.textContent = c.doc_id || "";
+              li.append(code, ` — ${c.title || ""}`);
+              ul.appendChild(li);
+            }
+          }
+          citesWrap.appendChild(ul);
+
+          const btnRow = document.createElement("div");
+          btnRow.className = "row";
+          const approveBtn = document.createElement("button");
+          approveBtn.className = "ok";
+          approveBtn.textContent = "Approve";
+          approveBtn.onclick = () => decide(item.approval_id, "approve");
+
+          const editBtn = document.createElement("button");
+          editBtn.className = "secondary";
+          editBtn.textContent = editLabel;
+          editBtn.onclick = () => decide(item.approval_id, "edit", editPayload);
+
+          const rejectBtn = document.createElement("button");
+          rejectBtn.className = "danger";
+          rejectBtn.textContent = "Reject";
+          rejectBtn.onclick = () => decide(item.approval_id, "reject");
+
+          btnRow.append(approveBtn, editBtn, rejectBtn);
+          div.append(header, meta, summaryDiv, citesWrap, btnRow);
           container.appendChild(div);
         }
       }

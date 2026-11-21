@@ -686,7 +686,7 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                 )
                 assert await cur.fetchone() == ("failed", "outcome_unknown")
 
-            # 7c. _execute_claimed_run CancelledError WITH op_id in checkpoint (reconcile branch)
+            # 7c. _execute_claimed_run CancelledError on resume WITH active op_id in checkpoint
             r_can_in = f"run_canin_{uuid.uuid4().hex[:6]}"
             async with pool.connection() as conn, conn.transaction():
                 await set_system_rls_bypass(conn)
@@ -695,8 +695,8 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                     INSERT INTO runs
                         (run_id, thread_id, tenant_id, kind, status, input,
                          cancel_requested, attempt, lease_owner, lease_expires_at)
-                    VALUES (%s, %s, 'tenant-alpha', 'start', 'running',
-                            '{"request_text":"status only check"}'::jsonb,
+                    VALUES (%s, %s, 'tenant-alpha', 'resume', 'running',
+                            '{"decision":"reject","approver_id":"bob"}'::jsonb,
                             true, 1, %s, now() + interval '30 seconds')
                     """,
                     (r_can_in, t_rec, worker.worker_id),
@@ -710,8 +710,8 @@ async def test_worker_in_process_sweep_compat_recovery_timeout_and_heartbeat() -
                     run_id=r_can_in,
                     thread_id=t_rec,
                     tenant_id="tenant-alpha",
-                    kind="start",
-                    input={"request_text": "status only check"},
+                    kind="resume",
+                    input={"decision": "reject", "approver_id": "bob"},
                     attempt=1,
                     created_by="alice",
                     creator_roles=frozenset({"engineer"}),

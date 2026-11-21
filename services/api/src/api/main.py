@@ -19,7 +19,7 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from core.audit import AuditEvent, write_audit_event
 from core.auth import AuthError, mint_user_jwt, verify_user_jwt
@@ -27,6 +27,7 @@ from core.config import Settings, get_settings
 from core.db import set_tenant_context
 from core.models import CallerIdentity, ChangePlan
 from core.policy import PolicyDecision, PolicyEngine
+from core.workflow_catalog import WORKFLOW_CATALOG
 
 WAKEUP_CHANNEL = "ops:runs:wakeup"
 CANCEL_CHANNEL = "ops:runs:cancel"
@@ -127,12 +128,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=str(exc),
             ) from exc
 
+    async def _best_effort_publish(rds: aioredis.Redis, channel: str, message: str) -> None:
+        """Redis wake-ups/cancel hints are strictly best-effort; Postgres is source of truth."""
+        try:
+            await rds.publish(channel, message)
+        except Exception:
+            return
+
     async def _enforce_rate_limit(request: Request, tenant_id: str) -> None:
         rds: aioredis.Redis = request.app.state.redis
         key = f"ratelimit:runs:{tenant_id}"
-        count = await rds.incr(key)
-        if count == 1:
-            await rds.expire(key, 60)
+        try:
+            count = await rds.incr(key)
+            if count == 1:
+                await rds.expire(key, 60)
+        except Exception:
+            # Degrade fail-open on Redis outage so Postgres-backed work is never dropped
+            return
         if count > 30:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -177,6 +189,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: CreateThreadRequest,
         caller: CallerIdentity = Depends(get_caller),  # noqa: B008
     ) -> dict[str, Any]:
+        meta = WORKFLOW_CATALOG.get(body.workflow_name)
+        if meta is None:
+            known = ", ".join(sorted(WORKFLOW_CATALOG))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Unknown workflow_name '{body.workflow_name}' (registered: {known})",
+            )
+        release_version = meta.release_version
+        checkpoint_compat = meta.current_checkpoint_compat()
         thread_id = f"thr_{uuid.uuid4().hex[:16]}"
         pool: AsyncConnectionPool[Any] = request.app.state.pool
         async with pool.connection() as conn, conn.transaction():
@@ -193,15 +214,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     caller.tenant_id,
                     caller.actor_id,
                     sorted(caller.roles),
-                    body.workflow_name,
-                    body.release_version,
-                    body.checkpoint_compat,
+                    meta.name,
+                    release_version,
+                    checkpoint_compat,
                 ),
             )
         return {
             "thread_id": thread_id,
             "tenant_id": caller.tenant_id,
             "created_by": caller.actor_id,
+            "workflow_name": meta.name,
+            "release_version": release_version,
+            "checkpoint_compat": checkpoint_compat,
             "status": "idle",
         }
 
@@ -319,8 +343,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         for cid in cancelled_run_ids:
-            await rds.publish(CANCEL_CHANNEL, cid)
-        await rds.publish(WAKEUP_CHANNEL, run_id)
+            await _best_effort_publish(rds, CANCEL_CHANNEL, cid)
+        await _best_effort_publish(rds, WAKEUP_CHANNEL, run_id)
         return {
             "run_id": run_id,
             "thread_id": thread_id,
@@ -501,7 +525,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "WHERE run_id = %s",
                     (run_id,),
                 )
-                await rds.publish(CANCEL_CHANNEL, run_id)
+                await _best_effort_publish(rds, CANCEL_CHANNEL, run_id)
                 return {"run_id": run_id, "status": "running", "cancel_requested": True}
 
             return {"run_id": run_id, "status": run_status, "cancel_requested": False}
@@ -607,7 +631,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         workflow_version=release_version,
                         event_type="approval_refused",
                         decision="refused",
-                        step_or_op_key=f"refuse:{approval_id}:{caller.actor_id}",
+                        step_or_op_key=f"refuse:{approval_id}:{caller.actor_id}:{resume_run_id}",
                         operation_id=operation_id,
                         details={"reason": authz.reason},
                     ),
@@ -628,7 +652,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 final_plan_hash = orig_plan_hash
             elif body.decision == "edit":
                 merged = {**orig_plan, **(body.edits or {})}
-                edited_obj = ChangePlan.model_validate(merged)
+                try:
+                    edited_obj = ChangePlan.model_validate(merged)
+                except ValidationError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=exc.errors(),
+                    ) from exc
                 final_plan = edited_obj.model_dump(mode="json")
                 final_plan_hash = edited_obj.plan_hash()
 
@@ -707,7 +737,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             await conn.commit()
 
-        await rds.publish(WAKEUP_CHANNEL, resume_run_id)
+        await _best_effort_publish(rds, WAKEUP_CHANNEL, resume_run_id)
         return {
             "run_id": resume_run_id,
             "thread_id": thread_id,

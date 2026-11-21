@@ -109,12 +109,14 @@ class RunWorker:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
-        await rds.xadd(
-            _stream_key(run_id),
-            {"event": event_type, "data": json.dumps(payload)},
-            maxlen=500,
-            approximate=True,
-        )
+        """Best-effort SSE event publish; a Redis outage must never fail execution."""
+        with contextlib.suppress(Exception):
+            await rds.xadd(
+                _stream_key(run_id),
+                {"event": event_type, "data": json.dumps(payload)},
+                maxlen=500,
+                approximate=True,
+            )
 
     async def _reconcile_in_flight_write(
         self,
@@ -823,7 +825,12 @@ class RunWorker:
         await pool.open()
         rds = aioredis.from_url(self.settings.redis_url, decode_responses=True)
         pubsub = rds.pubsub()
-        await pubsub.subscribe(WAKEUP_CHANNEL)
+        pubsub_subscribed = False
+        try:
+            await pubsub.subscribe(WAKEUP_CHANNEL)
+            pubsub_subscribed = True
+        except Exception:
+            pubsub_subscribed = False
 
         try:
             async with (
@@ -844,16 +851,22 @@ class RunWorker:
                     if claimed is not None:
                         await self._execute_claimed_run(pool, rds, checkpointer, store, claimed)
                         continue
-                    # Wait briefly for Redis wake-up or poll fallback
-                    try:
-                        await pubsub.get_message(
-                            ignore_subscribe_messages=True, timeout=self.poll_interval_s
-                        )
-                    except Exception:
+                    # Wait briefly for Redis wake-up or degrade cleanly to Postgres polling
+                    if pubsub_subscribed:
+                        try:
+                            await pubsub.get_message(
+                                ignore_subscribe_messages=True, timeout=self.poll_interval_s
+                            )
+                        except Exception:
+                            pubsub_subscribed = False
+                            await asyncio.sleep(self.poll_interval_s)
+                    else:
                         await asyncio.sleep(self.poll_interval_s)
         finally:
-            await pubsub.aclose()
-            await rds.aclose()
+            with contextlib.suppress(Exception):
+                await pubsub.aclose()
+            with contextlib.suppress(Exception):
+                await rds.aclose()
             await pool.close()
 
 

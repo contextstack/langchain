@@ -66,4 +66,5 @@ def get_embeddings(
         model="ops-embed",
         base_url=cfg.litellm_url,
         api_key=api_key,
+        check_embedding_ctx_length=False,
     )
