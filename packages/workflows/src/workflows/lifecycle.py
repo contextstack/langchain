@@ -37,7 +37,7 @@ from knowledge.fixtures import SEED_RUNBOOKS
 from knowledge.retriever import retrieve_runbooks
 from mcp_servers.domain_store import DomainStore, InMemoryDomainStore, PostgresDomainStore
 from workflows.incident_desk.state import IncidentDeskState
-from workflows.tool_executor import ToolExecutor
+from workflows.tool_executor import ToolExecutor, WriteSpec
 
 
 def maybe_inject_fault(point: str) -> None:
@@ -94,18 +94,13 @@ class DomainHooks:
 
     workflow_name: str
     release_version: str
-    reconcile_mcp_url: Callable[[Settings], str]
-    default_write_tool_id: str
     investigate_system_prompt: str
     build_read_tools: Callable[[ToolExecutor], list[Any]]
     build_mock_investigate_turns: Callable[
         [str, RunContext, list[dict[str, Any]]], list[AIMessage]
     ]
     deterministic_mock_plan: Callable[[str, list[dict[str, Any]]], ChangePlan]
-    execute_domain_write: Callable[
-        [ToolExecutor, RunContext, ChangePlan, str, str, bool],
-        Awaitable[tuple[str, dict[str, Any]]],
-    ]
+    resolve_write_spec: Callable[[ToolExecutor, RunContext, ChangePlan, str], WriteSpec]
     verify_domain_end_state: Callable[
         [ToolExecutor, RunContext, ChangePlan, str, dict[str, Any]],
         Awaitable[bool],
@@ -528,14 +523,14 @@ def build_governed_workflow_graph(
                 "final_status": "denied_plan_mismatch",
             }
 
+        write_spec = hooks.resolve_write_spec(executor, ctx, plan, operation_id)
         try:
-            tool_id, result = await hooks.execute_domain_write(
-                executor,
+            result = await executor.invoke_write(
                 ctx,
-                plan,
-                approver_id,
-                operation_id,
-                wf_deps.simulate_write_timeout,
+                spec=write_spec,
+                approved_by=approver_id,
+                operation_id=operation_id,
+                simulate_timeout=wf_deps.simulate_write_timeout,
             )
             maybe_inject_fault("after_write")
         except TimeoutError:
@@ -549,7 +544,7 @@ def build_governed_workflow_graph(
                     run_id=ctx.run_id,
                     workflow_version=state.get("release_version", hooks.release_version),
                     event_type="tool_write",
-                    tool_id=hooks.default_write_tool_id,
+                    tool_id=write_spec.tool_id,
                     operation_id=operation_id,
                     decision="outcome_unknown",
                     step_or_op_key=f"write:{operation_id}",
@@ -559,12 +554,12 @@ def build_governed_workflow_graph(
             )
             reconciled = await executor.reconcile_operation(
                 ctx,
-                mcp_url=hooks.reconcile_mcp_url(wf_deps.settings),
+                mcp_url=write_spec.reconcile_mcp_url,
                 operation_id=operation_id,
                 approved_by=approver_id,
             )
             rec_decision = (
-                "succeeded" if reconciled["status"] == "succeeded" else "outcome_unknown"
+                "succeeded" if reconciled.get("status") == "succeeded" else "outcome_unknown"
             )
             await _record_audit(
                 AuditEvent(
@@ -584,7 +579,7 @@ def build_governed_workflow_graph(
                     details=reconciled,
                 )
             )
-            if reconciled["status"] == "succeeded":
+            if reconciled.get("status") == "succeeded":
                 return {"execution_result": reconciled["result_payload"]}
             return {
                 "error_category": "outcome_unknown",
@@ -602,7 +597,7 @@ def build_governed_workflow_graph(
                 run_id=ctx.run_id,
                 workflow_version=state.get("release_version", hooks.release_version),
                 event_type="tool_write",
-                tool_id=tool_id,
+                tool_id=write_spec.tool_id,
                 operation_id=operation_id,
                 decision="succeeded",
                 step_or_op_key=f"write:{operation_id}",
@@ -627,9 +622,12 @@ def build_governed_workflow_graph(
         exec_res = state.get("execution_result") or {}
         assert plan is not None
 
-        passed = await hooks.verify_domain_end_state(
-            executor, ctx, plan, operation_id, exec_res
-        )
+        try:
+            passed = await hooks.verify_domain_end_state(
+                executor, ctx, plan, operation_id, exec_res
+            )
+        except TimeoutError:
+            passed = False
         if passed and runtime.store is not None:
             await runtime.store.aput(
                 (ctx.tenant_id, "memory", hooks.workflow_name),

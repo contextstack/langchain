@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from core.auth import mint_mcp_token
@@ -11,6 +12,17 @@ from core.models import RunContext
 from core.tool_contract import TOOL_CONTRACTS, invoke_with_contract
 from mcp_servers.domain_store import DomainStore
 from workflows.mcp_client import call_mcp_tool
+
+
+@dataclass(frozen=True)
+class WriteSpec:
+    """Resolved write operation carrying its tool ID, endpoint, args, and direct fallback."""
+
+    tool_id: str
+    mcp_url: str
+    mcp_args: dict[str, Any]
+    direct_fn: Callable[[], Awaitable[dict[str, Any]]]
+    reconcile_mcp_url: str
 
 
 class ToolExecutor:
@@ -60,19 +72,16 @@ class ToolExecutor:
         self,
         ctx: RunContext,
         *,
-        tool_id: str,
-        mcp_url: str,
-        mcp_args: dict[str, Any],
-        direct_fn: Callable[[], Awaitable[Any]],
+        spec: WriteSpec,
         approved_by: str,
         operation_id: str,
         simulate_timeout: bool = False,
     ) -> dict[str, Any]:
-        contract = TOOL_CONTRACTS[tool_id]
+        contract = TOOL_CONTRACTS[spec.tool_id]
 
         async def _call() -> dict[str, Any]:
             if simulate_timeout:
-                raise TimeoutError(f"Simulated downstream timeout for {tool_id}")
+                raise TimeoutError(f"Simulated downstream timeout for {spec.tool_id}")
             if self.use_mcp_http:
                 tok = mint_mcp_token(
                     tenant_id=ctx.tenant_id,
@@ -83,12 +92,12 @@ class ToolExecutor:
                     secret=self.settings.mcp_token_secret,
                 )
                 return await call_mcp_tool(
-                    url=mcp_url,
+                    url=spec.mcp_url,
                     bearer_token=tok,
-                    tool_name=tool_id,
-                    arguments=mcp_args,
+                    tool_name=spec.tool_id,
+                    arguments=spec.mcp_args,
                 )
-            return await direct_fn()
+            return await spec.direct_fn()
 
         return await invoke_with_contract(contract, _call)
 
@@ -122,4 +131,11 @@ class ToolExecutor:
                 tenant_id=ctx.tenant_id, operation_id=operation_id
             )
 
-        return await invoke_with_contract(contract, _call)
+        try:
+            return await invoke_with_contract(contract, _call)
+        except Exception as exc:
+            return {
+                "operation_id": operation_id,
+                "status": "outcome_unknown",
+                "error": str(exc),
+            }

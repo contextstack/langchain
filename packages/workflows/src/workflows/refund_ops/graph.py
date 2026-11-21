@@ -18,8 +18,8 @@ from workflows.lifecycle import (
     WorkflowDeps,
     build_governed_workflow_graph,
 )
-from workflows.refund_ops.version import RELEASE_VERSION
-from workflows.tool_executor import ToolExecutor
+from workflows.refund_ops.version import INVESTIGATE_SYSTEM_PROMPT, RELEASE_VERSION
+from workflows.tool_executor import ToolExecutor, WriteSpec
 
 _DOLLAR_RE = re.compile(r"\$([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
 _ACCOUNT_RE = re.compile(r"\b(ACC-\d+)\b", re.IGNORECASE)
@@ -134,17 +134,14 @@ def _mock_investigate_turns(
     ]
 
 
-async def _execute_write(
+def _resolve_write_spec(
     executor: ToolExecutor,
     ctx: RunContext,
     plan: ChangePlan,
-    approver_id: str,
     operation_id: str,
-    simulate_timeout: bool,
-) -> tuple[str, dict[str, Any]]:
+) -> WriteSpec:
     amount_cents = int(plan.amount_cents or 0)
-    result = await executor.invoke_write(
-        ctx,
+    return WriteSpec(
         tool_id="issue_refund",
         mcp_url=executor.settings.mcp_billing_url,
         mcp_args={
@@ -160,11 +157,8 @@ async def _execute_write(
             reason=plan.summary,
             operation_id=operation_id,
         ),
-        approved_by=approver_id,
-        operation_id=operation_id,
-        simulate_timeout=simulate_timeout,
+        reconcile_mcp_url=executor.settings.mcp_billing_url,
     )
-    return "issue_refund", result
 
 
 async def _verify_end_state(
@@ -217,16 +211,11 @@ def _build_memory_payload(
 REFUND_OPS_HOOKS = DomainHooks(
     workflow_name="refund_ops",
     release_version=RELEASE_VERSION,
-    reconcile_mcp_url=lambda s: s.mcp_billing_url,
-    default_write_tool_id="issue_refund",
-    investigate_system_prompt=(
-        "You are a Billing & Refund Operations investigator. Inspect customer "
-        "account status using read-only tools only. Summarize findings concisely."
-    ),
+    investigate_system_prompt=INVESTIGATE_SYSTEM_PROMPT,
     build_read_tools=_build_read_tools,
     build_mock_investigate_turns=_mock_investigate_turns,
     deterministic_mock_plan=_deterministic_mock_refund_plan,
-    execute_domain_write=_execute_write,
+    resolve_write_spec=_resolve_write_spec,
     verify_domain_end_state=_verify_end_state,
     build_memory_payload=_build_memory_payload,
 )

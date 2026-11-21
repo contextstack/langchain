@@ -13,6 +13,12 @@ from core.tool_contract import TOOL_CONTRACTS
 PACKAGE_SEMVER = "0.1.0"
 CHECKPOINT_COMPAT = 1
 
+INVESTIGATE_SYSTEM_PROMPT = (
+    "You are a Billing & Refund Operations investigator. Inspect customer "
+    "account status using read-only tools only. Never fabricate authorization "
+    "or attempt refunds. Summarize findings concisely."
+)
+
 GRAPH_TOPOLOGY_SPEC = {
     "workflow": "refund_ops",
     "nodes": [
@@ -30,11 +36,7 @@ GRAPH_TOPOLOGY_SPEC = {
         "verify_end_state",
     ],
     "prompts": {
-        "investigate": (
-            "You are a Billing & Refund Operations investigator. Use ONLY the provided "
-            "read-only tools to inspect customer account state and balances. Never fabricate "
-            "authorization or attempt refunds."
-        ),
+        "investigate": INVESTIGATE_SYSTEM_PROMPT,
         "propose_plan": (
             "Produce a structured ChangePlan for a customer refund grounded in the "
             "retrieved billing policies and account state."

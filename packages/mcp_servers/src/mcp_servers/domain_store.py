@@ -384,6 +384,12 @@ class PostgresDomainStore:
                 conn.cursor() as cur,
             ):
                 await set_tenant_context(conn, tenant_id)
+                # Serialize concurrent retries for the same operation_id BEFORE checking
+                # existing rows or mutating domain balances.
+                await cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (operation_id,),
+                )
                 dedup = await self._lookup_existing_op(
                     cur, operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
                 )
@@ -416,6 +422,12 @@ class PostgresDomainStore:
                 conn.cursor() as cur,
             ):
                 await set_tenant_context(conn, tenant_id)
+                # Serialize concurrent retries for the same operation_id BEFORE checking
+                # existing rows or mutating domain balances.
+                await cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (operation_id,),
+                )
                 dedup = await self._lookup_existing_op(
                     cur, operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
                 )

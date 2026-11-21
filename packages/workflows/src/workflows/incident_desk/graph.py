@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage
 from core.models import ChangePlan, RunbookCitation, RunContext
 from core.pii import redact_text
 from core.tool_contract import TOOL_CONTRACTS, cap_tool_output
-from workflows.incident_desk.version import RELEASE_VERSION
+from workflows.incident_desk.version import INVESTIGATE_SYSTEM_PROMPT, RELEASE_VERSION
 from workflows.lifecycle import (
     DomainHooks,
     StudioRunContext,
@@ -24,7 +24,7 @@ from workflows.lifecycle import (
 from workflows.lifecycle import (
     maybe_inject_fault as _maybe_inject_fault,
 )
-from workflows.tool_executor import ToolExecutor
+from workflows.tool_executor import ToolExecutor, WriteSpec
 
 __all__ = [
     "StudioRunContext",
@@ -168,18 +168,33 @@ def _build_read_tools(executor: ToolExecutor) -> list[Any]:
 def _mock_investigate_turns(
     req_text: str, ctx: RunContext, runbooks: list[dict[str, Any]]
 ) -> list[AIMessage]:
-    target_svc = "payments-worker" if "payments-worker" in req_text.lower() else "checkout-api"
+    lower = req_text.lower()
+    target_svc = "payments-worker" if "payments-worker" in lower else "checkout-api"
+    tool_calls: list[dict[str, Any]] = [
+        {
+            "id": "call_investigate_1",
+            "name": "get_service_status",
+            "args": {"service_name": target_svc},
+        }
+    ]
+    if "deploy" in lower:
+        tool_calls.append(
+            {
+                "id": "call_investigate_2",
+                "name": "list_recent_deploys",
+                "args": {"service_name": target_svc},
+            }
+        )
+    if "inc-" in lower or "ticket" in lower:
+        tool_calls.append(
+            {
+                "id": "call_investigate_3",
+                "name": "get_ticket",
+                "args": {"ticket_id": "INC-1001"},
+            }
+        )
     return [
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "id": "call_investigate_1",
-                    "name": "get_service_status",
-                    "args": {"service_name": target_svc},
-                }
-            ],
-        ),
+        AIMessage(content="", tool_calls=tool_calls),
         AIMessage(
             content=(
                 f"Investigated {target_svc} for tenant {ctx.tenant_id} "
@@ -189,18 +204,15 @@ def _mock_investigate_turns(
     ]
 
 
-async def _execute_write(
+def _resolve_write_spec(
     executor: ToolExecutor,
     ctx: RunContext,
     plan: ChangePlan,
-    approver_id: str,
     operation_id: str,
-    simulate_timeout: bool,
-) -> tuple[str, dict[str, Any]]:
+) -> WriteSpec:
     if plan.resource_type == "ticket" or plan.action == "update_ticket":
         ticket_id = plan.ticket_id or plan.target_resource
-        result = await executor.invoke_write(
-            ctx,
+        return WriteSpec(
             tool_id="update_ticket",
             mcp_url=executor.settings.mcp_ticketing_url,
             mcp_args={
@@ -216,14 +228,10 @@ async def _execute_write(
                 note=plan.summary,
                 operation_id=operation_id,
             ),
-            approved_by=approver_id,
-            operation_id=operation_id,
-            simulate_timeout=simulate_timeout,
+            reconcile_mcp_url=executor.settings.mcp_infra_url,
         )
-        return "update_ticket", result
 
-    result = await executor.invoke_write(
-        ctx,
+    return WriteSpec(
         tool_id="execute_service_change",
         mcp_url=executor.settings.mcp_infra_url,
         mcp_args={
@@ -239,11 +247,8 @@ async def _execute_write(
             target_version=plan.target_version,
             operation_id=operation_id,
         ),
-        approved_by=approver_id,
-        operation_id=operation_id,
-        simulate_timeout=simulate_timeout,
+        reconcile_mcp_url=executor.settings.mcp_infra_url,
     )
-    return "execute_service_change", result
 
 
 async def _verify_end_state(
@@ -294,16 +299,11 @@ def _build_memory_payload(
 INCIDENT_DESK_HOOKS = DomainHooks(
     workflow_name="incident_desk",
     release_version=RELEASE_VERSION,
-    reconcile_mcp_url=lambda s: s.mcp_infra_url,
-    default_write_tool_id="execute_service_change",
-    investigate_system_prompt=(
-        "You are an IT/Ops incident investigator. Inspect service health using "
-        "read-only tools only. Summarize findings concisely."
-    ),
+    investigate_system_prompt=INVESTIGATE_SYSTEM_PROMPT,
     build_read_tools=_build_read_tools,
     build_mock_investigate_turns=_mock_investigate_turns,
     deterministic_mock_plan=_deterministic_mock_plan,
-    execute_domain_write=_execute_write,
+    resolve_write_spec=_resolve_write_spec,
     verify_domain_end_state=_verify_end_state,
     build_memory_payload=_build_memory_payload,
 )

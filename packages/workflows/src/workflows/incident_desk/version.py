@@ -13,6 +13,12 @@ from core.tool_contract import TOOL_CONTRACTS
 PACKAGE_SEMVER = "0.1.0"
 CHECKPOINT_COMPAT = 1
 
+INVESTIGATE_SYSTEM_PROMPT = (
+    "You are an IT/Ops incident investigator. Inspect service health, recent deploys, "
+    "and incident tickets using read-only tools only. Never fabricate authorization "
+    "or attempt writes. Summarize findings concisely."
+)
+
 GRAPH_TOPOLOGY_SPEC = {
     "nodes": [
         "retrieve_context",
@@ -29,11 +35,7 @@ GRAPH_TOPOLOGY_SPEC = {
         "verify_end_state",
     ],
     "prompts": {
-        "investigate": (
-            "You are an IT/Ops incident investigator. Use ONLY the provided read-only tools "
-            "to inspect service health, recent deploys, and incident tickets. Never fabricate "
-            "authorization or attempt writes."
-        ),
+        "investigate": INVESTIGATE_SYSTEM_PROMPT,
         "propose_plan": (
             "Produce a structured ChangePlan grounded in the retrieved runbooks and tool outputs."
         ),
