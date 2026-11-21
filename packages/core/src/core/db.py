@@ -104,6 +104,17 @@ CREATE TABLE IF NOT EXISTS mock_tickets (
     PRIMARY KEY (tenant_id, ticket_id)
 );
 
+CREATE TABLE IF NOT EXISTS mock_accounts (
+    tenant_id       TEXT NOT NULL,
+    account_id      TEXT NOT NULL,
+    customer_name   TEXT NOT NULL,
+    balance_cents   INT  NOT NULL,
+    tier            TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, account_id)
+);
+
 CREATE TABLE IF NOT EXISTS mock_operations (
     operation_id    TEXT PRIMARY KEY,
     tenant_id       TEXT NOT NULL,
@@ -157,6 +168,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
     kb_documents,
     mock_services,
     mock_tickets,
+    mock_accounts,
     mock_operations
 TO app_rw;
 
@@ -177,6 +189,7 @@ BEGIN
         'kb_documents',
         'mock_services',
         'mock_tickets',
+        'mock_accounts',
         'mock_operations',
         'audit_log'
     ]

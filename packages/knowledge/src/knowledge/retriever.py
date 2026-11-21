@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 from pydantic import BaseModel
 
 from core.db import set_system_rls_bypass, set_tenant_context
-from knowledge.fixtures import SEED_RUNBOOKS, SEED_SERVICES, SEED_TICKETS
+from knowledge.fixtures import SEED_ACCOUNTS, SEED_RUNBOOKS, SEED_SERVICES, SEED_TICKETS
 
 
 class RetrievedRunbook(BaseModel, frozen=True):
@@ -133,8 +133,32 @@ async def seed_knowledge_and_domain(
                 ),
             )
 
+        for acct in SEED_ACCOUNTS:
+            await conn.execute(
+                """
+                INSERT INTO mock_accounts
+                    (tenant_id, account_id, customer_name, balance_cents, tier, status)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tenant_id, account_id) DO UPDATE SET
+                    customer_name = EXCLUDED.customer_name,
+                    balance_cents = EXCLUDED.balance_cents,
+                    tier = EXCLUDED.tier,
+                    status = EXCLUDED.status,
+                    updated_at = now()
+                """,
+                (
+                    acct.tenant_id,
+                    acct.account_id,
+                    acct.customer_name,
+                    acct.balance_cents,
+                    acct.tier,
+                    acct.status,
+                ),
+            )
+
     return {
         "runbooks": len(SEED_RUNBOOKS),
         "services": len(SEED_SERVICES),
         "tickets": len(SEED_TICKETS),
+        "accounts": len(SEED_ACCOUNTS),
     }

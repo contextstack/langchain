@@ -29,8 +29,9 @@ from telemetry.tracing import (
     configure_tracer_provider,
 )
 from workflows.incident_desk.graph import WorkflowDeps, build_incident_desk_graph
-from workflows.incident_desk.version import RELEASE_VERSION, get_checkpoint_compat
+from workflows.incident_desk.version import RELEASE_VERSION
 from workflows.mcp_client import call_mcp_tool
+from workflows.registry import get_workflow_spec
 
 WAKEUP_CHANNEL = "ops:runs:wakeup"
 CANCEL_CHANNEL = "ops:runs:cancel"
@@ -107,6 +108,7 @@ class RunWorker:
         attempt: int,
         operation_id: str,
         release_version: str,
+        mcp_url: str | None = None,
     ) -> tuple[str, str, str | None, dict[str, Any]]:
         """Reconcile an in-flight MCP write before settling a cancelled/expired run."""
         try:
@@ -120,7 +122,7 @@ class RunWorker:
                 )
                 rec = await asyncio.wait_for(
                     call_mcp_tool(
-                        url=self.settings.mcp_infra_url,
+                        url=mcp_url or self.settings.mcp_infra_url,
                         bearer_token=tok,
                         tool_name="get_operation_status",
                         arguments={"operation_id": operation_id},
@@ -231,7 +233,7 @@ class RunWorker:
                 await cur.execute(
                     """
                     SELECT r.run_id, r.thread_id, r.tenant_id, r.attempt,
-                           t.created_by, t.release_version
+                           t.created_by, t.release_version, t.workflow_name
                       FROM runs r
                       JOIN app_threads t ON t.thread_id = r.thread_id
                      WHERE r.status = 'running'
@@ -248,10 +250,17 @@ class RunWorker:
                     attempt,
                     created_by,
                     rel_ver,
+                    workflow_name,
                 ) in cancelled_expired:
                     snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
                     op_id = (snap.values or {}).get("operation_id") if snap else None
                     if op_id:
+                        try:
+                            reconcile_url = get_workflow_spec(workflow_name).reconcile_mcp_url(
+                                self.settings
+                            )
+                        except KeyError:
+                            reconcile_url = self.settings.mcp_infra_url
                         r_status, t_status, err_cat, rec = await self._reconcile_in_flight_write(
                             conn=conn,
                             domain=domain,
@@ -262,6 +271,7 @@ class RunWorker:
                             attempt=attempt,
                             operation_id=op_id,
                             release_version=rel_ver,
+                            mcp_url=reconcile_url,
                         )
                         detail = json.dumps({"reconciled": rec})
                     else:
@@ -340,7 +350,8 @@ class RunWorker:
                 run_id, thread_id, tenant_id, kind, run_input, attempt = row
                 await cur.execute(
                     """
-                    SELECT created_by, creator_roles, release_version, checkpoint_compat
+                    SELECT created_by, creator_roles, release_version, checkpoint_compat,
+                           workflow_name
                       FROM app_threads
                      WHERE thread_id = %s
                     """,
@@ -348,7 +359,7 @@ class RunWorker:
                 )
                 t_row = await cur.fetchone()
                 assert t_row is not None
-                created_by, creator_roles, release_version, thread_compat = t_row
+                created_by, creator_roles, release_version, thread_compat, workflow_name = t_row
 
                 if attempt > 1:
                     await write_audit_event(
@@ -379,6 +390,7 @@ class RunWorker:
             "creator_roles": frozenset(creator_roles),
             "release_version": release_version,
             "checkpoint_compat": thread_compat,
+            "workflow_name": workflow_name,
         }
 
     async def _fenced_finalize(
@@ -488,9 +500,27 @@ class RunWorker:
         attempt: int = claimed["attempt"]
         kind: str = claimed["kind"]
         run_input: dict[str, Any] = claimed["input"]
+        workflow_name: str = claimed.get("workflow_name", "incident_desk")
+
+        try:
+            wf_spec = get_workflow_spec(workflow_name)
+        except KeyError as exc:
+            committed = await self._fenced_finalize(
+                pool,
+                run_id=run_id,
+                thread_id=thread_id,
+                attempt=attempt,
+                run_status="failed",
+                thread_status="failed",
+                error_category="fatal",
+                error_detail=str(exc),
+            )
+            if committed:
+                await self._publish_event(rds, run_id, "error", {"error": str(exc)})
+            return
 
         # 1. Checkpoint compatibility check (AC-6)
-        current_compat = get_checkpoint_compat()
+        current_compat = wf_spec.get_checkpoint_compat()
         if claimed["checkpoint_compat"] != current_compat:
             async with pool.connection() as conn:
                 await set_tenant_context(conn, tenant_id)
@@ -501,7 +531,7 @@ class RunWorker:
                         actor_id=claimed["created_by"],
                         thread_id=thread_id,
                         run_id=run_id,
-                        workflow_version=RELEASE_VERSION,
+                        workflow_version=wf_spec.release_version,
                         event_type="version_blocked",
                         decision="deny",
                         step_or_op_key=f"version:{run_id}",
@@ -535,7 +565,7 @@ class RunWorker:
             use_mcp_http=(self.settings.mcp_transport == "http"),
             attempt=attempt,
         )
-        graph = build_incident_desk_graph(deps=deps, checkpointer=checkpointer, store=store)
+        graph = wf_spec.build_graph(deps=deps, checkpointer=checkpointer, store=store)
 
         ctx = RunContext(
             tenant_id=tenant_id,
@@ -558,9 +588,9 @@ class RunWorker:
             self._heartbeat_loop(pool, run_id=run_id, attempt=attempt, lost_lease=lost_lease)
         )
 
-        span_attrs = build_trace_attributes(ctx, workflow_version=RELEASE_VERSION)
+        span_attrs = build_trace_attributes(ctx, workflow_version=wf_spec.release_version)
         try:
-            with self._tracer.start_as_current_span("incident_desk.run", attributes=span_attrs):
+            with self._tracer.start_as_current_span(f"{wf_spec.name}.run", attributes=span_attrs):
                 snap = await graph.aget_state(config)
                 has_values = bool(snap and snap.values)
                 has_interrupts = bool(snap and snap.interrupts)
@@ -690,6 +720,7 @@ class RunWorker:
                         attempt=attempt,
                         operation_id=op_id,
                         release_version=claimed["release_version"],
+                        mcp_url=wf_spec.reconcile_mcp_url(self.settings),
                     )
                     await conn.commit()
                 committed = await self._fenced_finalize(

@@ -22,6 +22,7 @@ from core.pii import redact_obj, redact_text
 from core.policy import PolicyDecision, PolicyEngine
 from core.tool_contract import TRUNCATION_MARKER, cap_tool_output, invoke_with_contract
 from gateway.mocks import DeterministicMockEmbeddings
+from knowledge.fixtures import SEED_ACCOUNTS, SEED_RUNBOOKS
 from knowledge.retriever import retrieve_runbooks, seed_knowledge_and_domain
 from mcp_servers.auth_middleware import extract_bearer_token
 from mcp_servers.domain_store import (
@@ -325,7 +326,8 @@ async def test_postgres_migrations_ac12_append_only_and_acl_rag() -> None:
     embeddings = DeterministicMockEmbeddings()
     async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
         counts = await seed_knowledge_and_domain(conn, embeddings=embeddings)
-        assert counts["runbooks"] == 5
+        assert counts["runbooks"] == len(SEED_RUNBOOKS)
+        assert counts["accounts"] == len(SEED_ACCOUNTS)
 
         # ACL RAG: tenant-alpha engineer never sees tenant-beta OR approver-only docs
         docs_alpha_eng = await retrieve_runbooks(

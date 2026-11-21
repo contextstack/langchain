@@ -9,7 +9,7 @@ from typing import Any
 import psycopg
 
 from core.db import set_tenant_context
-from knowledge.fixtures import SEED_SERVICES, SEED_TICKETS
+from knowledge.fixtures import SEED_ACCOUNTS, SEED_SERVICES, SEED_TICKETS
 
 
 class IdempotencyConflictError(ValueError):
@@ -48,6 +48,17 @@ class InMemoryDomainStore:
                 "notes": list(t.notes),
             }
             for t in SEED_TICKETS
+        }
+        self.accounts: dict[tuple[str, str], dict[str, Any]] = {
+            (a.tenant_id, a.account_id): {
+                "tenant_id": a.tenant_id,
+                "account_id": a.account_id,
+                "customer_name": a.customer_name,
+                "balance_cents": a.balance_cents,
+                "tier": a.tier,
+                "status": a.status,
+            }
+            for a in SEED_ACCOUNTS
         }
         self.operations: dict[str, dict[str, Any]] = {}
 
@@ -191,6 +202,71 @@ class InMemoryDomainStore:
             "resource_type": "ticket",
             "resource_id": ticket_id,
             "action": "update_ticket",
+            "request_hash": req_hash,
+            "status": "succeeded",
+            "result_payload": result_payload,
+        }
+        return result_payload
+
+    async def get_account(self, *, tenant_id: str, account_id: str) -> dict[str, Any]:
+        acct = self.accounts.get((tenant_id, account_id))
+        if acct is None:
+            raise ResourceNotFoundError(f"Account '{account_id}' not found")
+        return dict(acct)
+
+    async def issue_refund(
+        self,
+        *,
+        tenant_id: str,
+        account_id: str,
+        amount_cents: int,
+        reason: str,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        req_hash = compute_request_hash(
+            {
+                "tenant_id": tenant_id,
+                "resource_type": "account",
+                "resource_id": account_id,
+                "action": "issue_refund",
+                "amount_cents": amount_cents,
+                "reason": reason,
+            }
+        )
+        existing = self.operations.get(operation_id)
+        if existing is not None:
+            if existing["tenant_id"] != tenant_id or existing["request_hash"] != req_hash:
+                raise IdempotencyConflictError(
+                    f"operation_id '{operation_id}' already used with a different payload"
+                )
+            return {**existing["result_payload"], "deduplicated": True}
+
+        acct = self.accounts.get((tenant_id, account_id))
+        if acct is None:
+            raise ResourceNotFoundError(f"Account '{account_id}' not found")
+        if amount_cents <= 0:
+            raise ValueError("Refund amount must be positive")
+        if acct["balance_cents"] < amount_cents:
+            raise ValueError(
+                f"Insufficient balance on account '{account_id}': "
+                f"{acct['balance_cents']} < {amount_cents}"
+            )
+
+        acct["balance_cents"] -= amount_cents
+        result_payload = {
+            "operation_id": operation_id,
+            "account_id": account_id,
+            "amount_cents": amount_cents,
+            "new_balance_cents": acct["balance_cents"],
+            "reason": reason,
+            "deduplicated": False,
+        }
+        self.operations[operation_id] = {
+            "operation_id": operation_id,
+            "tenant_id": tenant_id,
+            "resource_type": "account",
+            "resource_id": account_id,
+            "action": "issue_refund",
             "request_hash": req_hash,
             "status": "succeeded",
             "result_payload": result_payload,
@@ -486,6 +562,135 @@ class PostgresDomainStore:
                     operation_id,
                     tenant_id,
                     ticket_id,
+                    req_hash,
+                    json.dumps(result_payload),
+                ),
+            )
+            return result_payload
+
+    async def get_account(self, *, tenant_id: str, account_id: str) -> dict[str, Any]:
+        async with (
+            await psycopg.AsyncConnection.connect(self._dsn) as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
+            await set_tenant_context(conn, tenant_id)
+            await cur.execute(
+                """
+                SELECT tenant_id, account_id, customer_name, balance_cents, tier, status
+                  FROM mock_accounts
+                 WHERE tenant_id = %s AND account_id = %s
+                """,
+                (tenant_id, account_id),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise ResourceNotFoundError(f"Account '{account_id}' not found")
+        return {
+            "tenant_id": row[0],
+            "account_id": row[1],
+            "customer_name": row[2],
+            "balance_cents": int(row[3]),
+            "tier": row[4],
+            "status": row[5],
+        }
+
+    async def issue_refund(
+        self,
+        *,
+        tenant_id: str,
+        account_id: str,
+        amount_cents: int,
+        reason: str,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        if amount_cents <= 0:
+            raise ValueError("Refund amount must be positive")
+        req_hash = compute_request_hash(
+            {
+                "tenant_id": tenant_id,
+                "resource_type": "account",
+                "resource_id": account_id,
+                "action": "issue_refund",
+                "amount_cents": amount_cents,
+                "reason": reason,
+            }
+        )
+        async with (
+            await psycopg.AsyncConnection.connect(self._dsn) as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
+            await set_tenant_context(conn, tenant_id)
+            await cur.execute(
+                """
+                SELECT tenant_id, request_hash, result_payload
+                  FROM mock_operations
+                 WHERE operation_id = %s
+                   FOR UPDATE
+                """,
+                (operation_id,),
+            )
+            existing = await cur.fetchone()
+            if existing is not None:
+                if existing[0] != tenant_id or existing[1] != req_hash:
+                    raise IdempotencyConflictError(
+                        f"operation_id '{operation_id}' already used with different payload"
+                    )
+                payload = (
+                    existing[2]
+                    if isinstance(existing[2], dict)
+                    else json.loads(existing[2])
+                )
+                return {**payload, "deduplicated": True}
+
+            await cur.execute(
+                """
+                SELECT balance_cents, status
+                  FROM mock_accounts
+                 WHERE tenant_id = %s AND account_id = %s
+                   FOR UPDATE
+                """,
+                (tenant_id, account_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ResourceNotFoundError(f"Account '{account_id}' not found")
+            current_balance = int(row[0])
+            if current_balance < amount_cents:
+                raise ValueError(
+                    f"Insufficient balance on account '{account_id}': "
+                    f"{current_balance} < {amount_cents}"
+                )
+
+            new_balance = current_balance - amount_cents
+            await cur.execute(
+                """
+                UPDATE mock_accounts
+                   SET balance_cents = %s, updated_at = now()
+                 WHERE tenant_id = %s AND account_id = %s
+                """,
+                (new_balance, tenant_id, account_id),
+            )
+            result_payload = {
+                "operation_id": operation_id,
+                "account_id": account_id,
+                "amount_cents": amount_cents,
+                "new_balance_cents": new_balance,
+                "reason": reason,
+                "deduplicated": False,
+            }
+            await cur.execute(
+                """
+                INSERT INTO mock_operations
+                    (operation_id, tenant_id, resource_type, resource_id, action,
+                     request_hash, status, result_payload)
+                VALUES (%s, %s, 'account', %s, 'issue_refund', %s, 'succeeded', %s::jsonb)
+                """,
+                (
+                    operation_id,
+                    tenant_id,
+                    account_id,
                     req_hash,
                     json.dumps(result_payload),
                 ),

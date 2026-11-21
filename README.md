@@ -20,7 +20,7 @@ Everything so far runs locally at **\$0 in licences**. All CI tests, offline eva
 - **Execution Plane (`services/api`, `services/worker`, `packages/workflows`, `packages/mcp_servers`):**
   - FastAPI **never** executes a graph - it authenticates, writes to PostgreSQL `runs`, and streams reconnectable SSE (`Last-Event-ID`) from Redis Streams.
   - A separate worker process claims runs via `FOR UPDATE SKIP LOCKED`, holds fenced leases `(lease_owner, attempt)` with heartbeats, runs LangGraph with `durability="sync"`, and automatically reclaims crashed workers' runs.
-  - Flagship workflow: **IT / Ops Change-Request & Incident Desk** (`StateGraph` outer orchestrator + LangChain v1 `create_agent` with `PIIMiddleware`, `SummarizationMiddleware`, `ModelCallLimitMiddleware`, `ToolCallLimitMiddleware`, `interrupt()`/`Command(resume=...)` HITL approval, idempotent writes, and deterministic end-state verification).
+  - Workflows registered via `WORKFLOW_REGISTRY`: **IT / Ops Change-Request & Incident Desk** (`incident_desk`) and **Customer Billing / Refund Operations Desk** (`refund_ops`) — proving *"swap the tools, change the factory"* on the exact same Control, Execution, and Evidence substrate (`StateGraph` outer orchestrator + LangChain v1 `create_agent` with `PIIMiddleware`, `SummarizationMiddleware`, `ModelCallLimitMiddleware`, `ToolCallLimitMiddleware`, `interrupt()`/`Command(resume=...)` HITL approval, idempotent writes, and deterministic end-state verification).
 - **Evidence Plane (`packages/telemetry`, `evals/`):**
   - OpenTelemetry spans with mandatory PII masking → self-hosted Langfuse (with a zero-code env-var toggle to commercial LangSmith).
   - Separate, DB-enforced append-only PostgreSQL `audit_log` (role grants + trigger).
@@ -61,11 +61,12 @@ uv run ops-cli drill cancel-after-write
 
 ## Interactive Demo (API + Worker + Authenticated MCP + Single-File Web UI)
 
-To run the full authenticated Streamable HTTP MCP path, start the two FastMCP servers, then the worker and API:
+To run the full authenticated Streamable HTTP MCP path, start the FastMCP servers, then the worker and API:
 
 ```bash
-uv run ops-mcp-infra                      # Streamable HTTP MCP server on :8101
-uv run ops-mcp-ticketing                  # Streamable HTTP MCP server on :8102
+uv run ops-mcp-infra                      # Streamable HTTP MCP server on :8101 (incident_desk)
+uv run ops-mcp-ticketing                  # Streamable HTTP MCP server on :8102 (incident_desk)
+uv run ops-mcp-billing                    # Streamable HTTP MCP server on :8103 (refund_ops)
 MCP_TRANSPORT=http uv run ops-worker      # Claims runs & calls MCP servers with signed JWTs
 uv run ops-api                            # FastAPI + single-file Demo UI on :8000
 ```

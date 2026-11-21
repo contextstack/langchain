@@ -9,7 +9,10 @@ from pydantic import BaseModel
 from core.models import CallerIdentity, ChangePlan, RunContext, ToolContract
 
 DISALLOWED_ACTIONS = frozenset({"delete_cluster", "drop_database"})
-ALLOWED_WRITE_ACTIONS = frozenset({"rollback", "restart", "scale_up", "update_ticket"})
+ALLOWED_WRITE_ACTIONS = frozenset(
+    {"rollback", "restart", "scale_up", "update_ticket", "issue_refund"}
+)
+MAX_REFUND_CENTS = 500_000  # $5,000 hard policy ceiling
 REQUESTER_ROLES = frozenset({"engineer", "ops-approver", "admin"})
 APPROVER_ROLES = frozenset({"ops-approver", "admin"})
 
@@ -85,6 +88,21 @@ class PolicyEngine:
                 decision=PolicyDecision.DENY,
                 reason=f"Unknown or unsupported action '{plan.action}'",
             )
+
+        if plan.action == "issue_refund":
+            if plan.amount_cents is None or plan.amount_cents <= 0:
+                return PolicyResult(
+                    decision=PolicyDecision.DENY,
+                    reason="Refund amount_cents must be positive",
+                )
+            if plan.amount_cents > MAX_REFUND_CENTS:
+                return PolicyResult(
+                    decision=PolicyDecision.DENY,
+                    reason=(
+                        f"Refund {plan.amount_cents} cents exceeds policy ceiling "
+                        f"({MAX_REFUND_CENTS} cents)"
+                    ),
+                )
 
         return PolicyResult(
             decision=PolicyDecision.REQUIRE_APPROVAL,

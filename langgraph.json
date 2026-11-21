@@ -1,7 +1,8 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "incident_desk": "./packages/workflows/src/workflows/incident_desk/graph.py:build_studio_graph"
+    "incident_desk": "./packages/workflows/src/workflows/incident_desk/graph.py:build_studio_graph",
+    "refund_ops": "./packages/workflows/src/workflows/refund_ops/graph.py:build_studio_graph"
   },
   "env": ".env"
 }

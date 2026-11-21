@@ -37,9 +37,9 @@ class RunbookCitation(BaseModel, frozen=True):
 
 
 class ChangePlan(BaseModel, frozen=True):
-    """Structured change proposal produced by the workflow and shown to approvers."""
+    """Structured change proposal produced by a workflow and shown to approvers."""
 
-    resource_type: Literal["service", "ticket", "none"] = "service"
+    resource_type: Literal["service", "ticket", "account", "none"] = "service"
     target_resource: str = ""
     action: Literal[
         "none",
@@ -47,10 +47,12 @@ class ChangePlan(BaseModel, frozen=True):
         "restart",
         "scale_up",
         "update_ticket",
+        "issue_refund",
         "delete_cluster",
         "drop_database",
     ] = "none"
     target_version: str | None = None
+    amount_cents: int | None = None
     rollback_plan: str = ""
     risk_level: Literal["low", "medium", "high", "critical"] = "medium"
     summary: str = ""

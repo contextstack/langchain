@@ -11,6 +11,7 @@ dependencies = [
 [project.scripts]
 ops-mcp-infra = "mcp_servers.infra_server:run"
 ops-mcp-ticketing = "mcp_servers.ticketing_server:run"
+ops-mcp-billing = "mcp_servers.billing_server:run"
 
 [build-system]
 requires = ["hatchling"]

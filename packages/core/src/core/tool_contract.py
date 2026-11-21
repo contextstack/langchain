@@ -79,4 +79,20 @@ TOOL_CONTRACTS: dict[str, ToolContract] = {
         idempotency_required=True,
         audit_required=True,
     ),
+    "get_account": ToolContract(
+        tool_id="get_account",
+        version="1.0.0",
+        read_write_class="read",
+        timeout_s=10.0,
+        max_output_chars=8000,
+    ),
+    "issue_refund": ToolContract(
+        tool_id="issue_refund",
+        version="1.0.0",
+        read_write_class="write",
+        timeout_s=10.0,
+        max_output_chars=8000,
+        idempotency_required=True,
+        audit_required=True,
+    ),
 }
