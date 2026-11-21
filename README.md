@@ -26,7 +26,11 @@ Everything so far runs locally at **\$0 in licences**. All CI tests, offline eva
   - Separate, DB-enforced append-only PostgreSQL `audit_log` (role grants + trigger).
   - Offline evaluation suite (`evals/datasets/core.jsonl`) with deterministic ground-truth evaluators and a hand-labeled calibration set (`evals/datasets/calibration.jsonl`).
 
-See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete build-vs-buy breakdown against **LangSmith Platform** and **LangSmith Deployments / Agent Server**.
+See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete build-vs-buy breakdown against **LangSmith Platform** and **LangSmith Deployments / Agent Server**, and [docs/adr/0001-oss-control-execution-evidence-architecture.md](./docs/adr/0001-oss-control-execution-evidence-architecture.md) for the full Architecture Decision Record (ADR).
+
+### What This Reference Proves (and Doesn't)
+- **Proven at \$0 (automated, repeatable):** Crash recovery across real `SIGKILL`/`os._exit(137)` worker kills, exactly-once external mutations under retries and 3 parallel workers, fail-closed PostgreSQL Row-Level Security (RLS), separation of duties, MCP outage resilience, PII masking at the live OTLP/HTTP export boundary, and reusable runtime dispatch across two distinct domains (`incident_desk` and `refund_ops`).
+- **Not proven by the mock suite:** Real-provider LLM planning accuracy. Gateway and judge wiring are verified against local stubs; evaluating real model quality requires running a labeled eval against your target provider via LiteLLM (`MODEL_MODE=gateway`).
 
 ---
 
@@ -59,21 +63,46 @@ uv run ops-cli drill cancel-after-write
 
 ---
 
-## Interactive Demo (API + Worker + Authenticated MCP + Single-File Web UI)
+## 5-Minute Guided Walkthrough (Submit → Approve → Verify → Audit → Crash Drill)
 
-To run the full authenticated Streamable HTTP MCP path, start the FastMCP servers, then the worker and API:
+1. **Start the infrastructure, migrate, and seed:**
+   ```bash
+   cp .env.example .env
+   docker compose up -d --wait
+   uv sync
+   uv run ops-cli db migrate
+   uv run ops-cli seed
+   ```
 
-```bash
-uv run ops-mcp-infra                      # Streamable HTTP MCP server on :8101 (incident_desk)
-uv run ops-mcp-ticketing                  # Streamable HTTP MCP server on :8102 (incident_desk)
-uv run ops-mcp-billing                    # Streamable HTTP MCP server on :8103 (refund_ops)
-MCP_TRANSPORT=http uv run ops-worker      # Claims runs & calls MCP servers with signed JWTs
-uv run ops-api                            # FastAPI + single-file Demo UI on :8000
-```
+2. **Start the authenticated FastMCP servers, worker, and API** (in separate terminals):
+   ```bash
+   uv run ops-mcp-infra                      # Streamable HTTP MCP server on :8101 (incident_desk)
+   uv run ops-mcp-ticketing                  # Streamable HTTP MCP server on :8102 (incident_desk)
+   uv run ops-mcp-billing                    # Streamable HTTP MCP server on :8103 (refund_ops)
+   MCP_TRANSPORT=http uv run ops-worker      # Claims runs & calls MCP servers with signed JWTs
+   uv run ops-api                            # FastAPI + single-file Demo UI on :8000
+   ```
+   *(For quick zero-daemon local runs without starting the MCP servers, omit `MCP_TRANSPORT=http` to use direct Postgres store mode.)*
 
-*(For quick zero-daemon local runs without starting the MCP servers, omit `MCP_TRANSPORT=http` to use direct Postgres store mode.)*
+3. **Run the human-in-the-loop workflow in the Demo UI (`http://127.0.0.1:8000`):**
+   - Pick **`incident_desk`** (or switch to **`refund_ops`**) and stay as **`alice@tenant-alpha [engineer]`**.
+   - Click **Submit Request** — watch the live SSE stream investigate via read-only tools, propose a typed `ChangePlan`, pass `PolicyEngine`, and pause at `interrupt` (`awaiting_approval`).
+   - Switch persona to **`dana`** (or stay as `alice`) to verify separation-of-duties / role enforcement, then switch to **`bob@tenant-alpha [ops-approver]`**.
+   - Click **Approve** in the HITL Approval Inbox — the worker resumes the checkpoint, executes the idempotent write over authenticated MCP HTTP, verifies the post-write state, and streams `done`.
 
-Open **`http://127.0.0.1:8000`** for the single-file Demo UI (persona/tenant switcher for `alice`, `bob`, `carol`, `dana`, authenticated `fetch()` SSE stream, and HITL Approval Inbox).
+4. **Inspect the append-only PostgreSQL audit trail:**
+   ```bash
+   docker compose exec postgres psql -U postgres -d contextstack -c \
+     "SELECT created_at, event_type, requested_by, approved_by, tool_id, decision, operation_id
+        FROM audit_log ORDER BY created_at DESC LIMIT 8;"
+   ```
+   Notice that `audit_log` records both `requested_by = alice` and `approved_by = bob` alongside the `operation_id`, and `app_rw` cannot `UPDATE` or `DELETE` rows (enforced by both role grants and a DB trigger).
+
+5. **Run a real worker-kill crash drill:**
+   ```bash
+   uv run ops-cli drill crash-after-write
+   ```
+   This spawns a worker with `FAULT_INJECT=after_write` (`os._exit(137)` right after the external write commits, before checkpointing), lets a replacement worker reclaim the expired lease automatically, and proves the downstream service mutated **exactly once**. See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for what this drill teaches about building vs. buying an Agent Server.
 
 ### Local LangGraph Studio
 
