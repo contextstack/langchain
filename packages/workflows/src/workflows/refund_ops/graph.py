@@ -699,7 +699,7 @@ def build_refund_ops_graph(
         return "verify_end_state"
 
     # ------------------------------------------------------------------
-    # Node 9: verify_end_state (Deterministic account balance read-back)
+    # Node 9: verify_end_state (Deterministic ledger + account read-back)
     # ------------------------------------------------------------------
     async def verify_end_state(
         state: IncidentDeskState, runtime: Runtime[RunContext]
@@ -707,7 +707,8 @@ def build_refund_ops_graph(
         ctx = _ctx(runtime)
         plan = _coerce_plan(state.get("change_plan"))
         exec_res = state.get("execution_result") or {}
-        assert plan is not None
+        operation_id = state.get("operation_id")
+        assert plan is not None and operation_id is not None
 
         if wf_deps.use_mcp_http:
             tok = mint_mcp_token(
@@ -716,6 +717,12 @@ def build_refund_ops_graph(
                 run_id=ctx.run_id,
                 secret=wf_deps.settings.mcp_token_secret,
             )
+            op_status = await call_mcp_tool(
+                url=wf_deps.settings.mcp_billing_url,
+                bearer_token=tok,
+                tool_name="get_operation_status",
+                arguments={"operation_id": operation_id},
+            )
             acct = await call_mcp_tool(
                 url=wf_deps.settings.mcp_billing_url,
                 bearer_token=tok,
@@ -723,16 +730,25 @@ def build_refund_ops_graph(
                 arguments={"account_id": plan.target_resource},
             )
         else:
+            op_status = await domain.get_operation_status(
+                tenant_id=ctx.tenant_id, operation_id=operation_id
+            )
             acct = await domain.get_account(
                 tenant_id=ctx.tenant_id, account_id=plan.target_resource
             )
 
         expected_balance = exec_res.get("new_balance_cents")
-        passed = (
+        op_committed = (
+            op_status.get("status") == "succeeded"
+            and (op_status.get("result_payload") or {}).get("amount_cents") == plan.amount_cents
+        )
+        # Under concurrent refunds on the same account, current balance may be <= expected_balance
+        balance_ok = (
             expected_balance is not None
-            and int(acct["balance_cents"]) == int(expected_balance)
+            and 0 <= int(acct["balance_cents"]) <= int(expected_balance)
             and acct["status"] == "active"
         )
+        passed = op_committed and balance_ok
         if passed and runtime.store is not None:
             op_key = state.get("operation_id") or ctx.run_id
             await runtime.store.aput(
