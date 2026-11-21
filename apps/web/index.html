@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ContextStack Enterprise LangChain — IT/Ops Desk</title>
+    <title>ContextStack Enterprise LangChain — Operations Console</title>
     <style>
       :root {
         --bg: #0f172a;
@@ -100,9 +100,14 @@
     </style>
   </head>
   <body>
-    <h1>ContextStack IT/Ops Change-Request &amp; Incident Desk</h1>
+    <h1>ContextStack Enterprise LangChain Operations Console</h1>
 
     <div class="bar">
+      <label for="workflow"><strong>Workflow:</strong></label>
+      <select id="workflow">
+        <option value="incident_desk">incident_desk (IT/Ops Change &amp; Incident Desk)</option>
+        <option value="refund_ops">refund_ops (Customer Billing &amp; Refund Desk)</option>
+      </select>
       <label for="persona"><strong>Persona / Tenant:</strong></label>
       <select id="persona">
         <option value="alice">alice@tenant-alpha [engineer]</option>
@@ -116,11 +121,11 @@
 
     <div class="grid">
       <section class="card">
-        <h2>1. Incident Console</h2>
-        <p class="muted">Creates a tenant-scoped thread, enqueues a run, and streams SSE via authenticated <code>fetch()</code>.</p>
+        <h2>1. Request Console</h2>
+        <p class="muted">Creates a tenant-scoped thread for the selected workflow, enqueues a run, and streams SSE via authenticated <code>fetch()</code>.</p>
         <textarea id="requestText">checkout-api is returning 502s after v2.4.1 deploy</textarea>
         <div class="row">
-          <button id="submitBtn">Submit Incident</button>
+          <button id="submitBtn">Submit Request</button>
           <button id="cancelBtn" class="secondary">Cancel Active Run</button>
         </div>
         <h3 style="margin-top: 16px;">Live Execution Stream</h3>
@@ -210,16 +215,22 @@
         }
       }
 
-      async function submitIncident() {
+      const DEFAULT_PROMPTS = {
+        incident_desk: "checkout-api is returning 502s after v2.4.1 deploy",
+        refund_ops: "Issue $150 refund to ACC-1001 for SLA breach",
+      };
+
+      async function submitRequest() {
+        const workflowName = document.getElementById("workflow").value;
         const text = document.getElementById("requestText").value.trim();
         if (!text) return;
         const tRes = await apiFetch("/v1/threads", {
           method: "POST",
-          body: JSON.stringify({ workflow_name: "incident_desk" }),
+          body: JSON.stringify({ workflow_name: workflowName }),
         });
         const thread = await tRes.json();
         if (!tRes.ok) { log(`Create thread failed: ${JSON.stringify(thread)}`); return; }
-        log(`Created thread ${thread.thread_id}`);
+        log(`Created ${workflowName} thread ${thread.thread_id}`);
 
         const rRes = await apiFetch(`/v1/threads/${thread.thread_id}/runs`, {
           method: "POST",
@@ -273,30 +284,42 @@
           const cites = (item.plan.citations || [])
             .map((c) => `<li><code>${c.doc_id}</code> — ${c.title}</li>`)
             .join("");
+          const isRefund = item.plan.action === "issue_refund";
+          const amountInfo = isRefund && item.plan.amount_cents
+            ? ` ($${(item.plan.amount_cents / 100).toFixed(2)})`
+            : "";
+          const editLabel = isRefund ? "Edit → $100 Refund" : "Edit → Restart";
+          const editPayload = isRefund
+            ? { amount_cents: 10000 }
+            : { action: "restart", target_version: null };
           div.innerHTML = `
             <div><strong>${item.approval_id}</strong> <span class="pill">by ${item.requested_by}</span></div>
             <div class="muted" style="margin:6px 0;">
-              Action: <strong>${item.plan.action}</strong> on <code>${item.plan.target_resource}</code>
+              Action: <strong>${item.plan.action}${amountInfo}</strong> on <code>${item.plan.target_resource}</code>
               (risk: ${item.plan.risk_level})
             </div>
             <div>${item.plan.summary || ""}</div>
             <div class="muted" style="margin-top:6px;">Cited Runbooks:<ul>${cites || "<li>none</li>"}</ul></div>
             <div class="row">
               <button class="ok" data-act="approve">Approve</button>
-              <button class="secondary" data-act="edit">Edit → Restart</button>
+              <button class="secondary" data-act="edit">${editLabel}</button>
               <button class="danger" data-act="reject">Reject</button>
             </div>
           `;
           div.querySelector('[data-act="approve"]').onclick = () => decide(item.approval_id, "approve");
           div.querySelector('[data-act="edit"]').onclick = () =>
-            decide(item.approval_id, "edit", { action: "restart", target_version: null });
+            decide(item.approval_id, "edit", editPayload);
           div.querySelector('[data-act="reject"]').onclick = () => decide(item.approval_id, "reject");
           container.appendChild(div);
         }
       }
 
+      document.getElementById("workflow").addEventListener("change", (e) => {
+        const prompt = DEFAULT_PROMPTS[e.target.value];
+        if (prompt) document.getElementById("requestText").value = prompt;
+      });
       document.getElementById("persona").addEventListener("change", (e) => switchPersona(e.target.value));
-      document.getElementById("submitBtn").addEventListener("click", submitIncident);
+      document.getElementById("submitBtn").addEventListener("click", submitRequest);
       document.getElementById("cancelBtn").addEventListener("click", cancelActiveRun);
       document.getElementById("refreshApprovalsBtn").addEventListener("click", refreshApprovals);
 

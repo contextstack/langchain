@@ -165,7 +165,9 @@ async def test_whole_system_tcp_smoke_ui_sse_mcp_rls_and_audit() -> None:
             assert (await client.get("/healthz")).json() == {"status": "ok"}
             ui_resp = await client.get("/")
             assert ui_resp.status_code == 200
-            assert "ContextStack IT/Ops Change-Request" in ui_resp.text
+            assert "ContextStack Enterprise LangChain Operations Console" in ui_resp.text
+            assert 'value="incident_desk"' in ui_resp.text
+            assert 'value="refund_ops"' in ui_resp.text
 
             # 2. Mint persona tokens via the Demo UI's /v1/dev/token endpoint
             tokens: dict[str, dict[str, str]] = {}
