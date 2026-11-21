@@ -307,77 +307,96 @@ class RunWorker:
     async def _claim_one_run(self, pool: AsyncConnectionPool[Any]) -> dict[str, Any] | None:
         async with pool.connection() as conn:
             await set_system_rls_bypass(conn)
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    WITH candidate AS (
-                        SELECT run_id
-                          FROM runs
-                         WHERE (
-                                 status = 'queued'
-                              OR (status = 'running' AND lease_expires_at < now())
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        WITH candidate AS (
+                            SELECT r.run_id
+                              FROM runs r
+                              JOIN app_threads t ON t.thread_id = r.thread_id
+                             WHERE (
+                                     r.status = 'queued'
+                                  OR (r.status = 'running' AND r.lease_expires_at < now())
+                                   )
+                               AND r.cancel_requested = false
+                               AND r.attempt < r.max_attempts
+                               AND NOT (r.kind = 'start' AND t.status = 'awaiting_approval')
+                               AND NOT (
+                                   r.kind = 'start'
+                                   AND EXISTS (
+                                       SELECT 1
+                                         FROM runs r_res
+                                        WHERE r_res.thread_id = r.thread_id
+                                          AND r_res.kind = 'resume'
+                                          AND r_res.status IN ('queued', 'running')
+                                   )
                                )
-                           AND cancel_requested = false
-                           AND attempt < max_attempts
-                           AND NOT EXISTS (
-                               SELECT 1
-                                 FROM runs r2
-                                WHERE r2.thread_id = runs.thread_id
-                                  AND r2.status = 'running'
-                                  AND r2.run_id <> runs.run_id
-                           )
-                         ORDER BY created_at ASC
-                         LIMIT 1
-                           FOR UPDATE SKIP LOCKED
+                               AND NOT EXISTS (
+                                   SELECT 1
+                                     FROM runs r2
+                                    WHERE r2.thread_id = r.thread_id
+                                      AND r2.status = 'running'
+                                      AND r2.run_id <> r.run_id
+                               )
+                             ORDER BY (CASE WHEN r.kind = 'resume' THEN 0 ELSE 1 END),
+                                      r.created_at ASC
+                             LIMIT 1
+                               FOR UPDATE OF r, t SKIP LOCKED
+                        )
+                        UPDATE runs r
+                           SET status = 'running',
+                               lease_owner = %s,
+                               lease_expires_at = now() + (%s * interval '1 second'),
+                               attempt = r.attempt + 1,
+                               updated_at = now()
+                          FROM candidate c
+                         WHERE r.run_id = c.run_id
+                        RETURNING r.run_id, r.thread_id, r.tenant_id, r.kind, r.input, r.attempt
+                        """,
+                        (self.worker_id, self.lease_s),
                     )
-                    UPDATE runs r
-                       SET status = 'running',
-                           lease_owner = %s,
-                           lease_expires_at = now() + (%s * interval '1 second'),
-                           attempt = r.attempt + 1,
-                           updated_at = now()
-                      FROM candidate c
-                     WHERE r.run_id = c.run_id
-                    RETURNING r.run_id, r.thread_id, r.tenant_id, r.kind, r.input, r.attempt
-                    """,
-                    (self.worker_id, self.lease_s),
-                )
-                row = await cur.fetchone()
-                if row is None:
-                    await conn.commit()
-                    return None
+                    row = await cur.fetchone()
+                    if row is None:
+                        await conn.commit()
+                        return None
 
-                run_id, thread_id, tenant_id, kind, run_input, attempt = row
-                await cur.execute(
-                    """
-                    SELECT created_by, creator_roles, release_version, checkpoint_compat,
-                           workflow_name
-                      FROM app_threads
-                     WHERE thread_id = %s
-                    """,
-                    (thread_id,),
-                )
-                t_row = await cur.fetchone()
-                assert t_row is not None
-                created_by, creator_roles, release_version, thread_compat, workflow_name = t_row
-
-                if attempt > 1:
-                    await write_audit_event(
-                        conn,
-                        AuditEvent(
-                            tenant_id=tenant_id,
-                            actor_id=created_by,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            workflow_version=release_version,
-                            event_type="run_reclaimed",
-                            decision="allow",
-                            step_or_op_key=f"reclaim:{run_id}",
-                            attempt=attempt,
-                            details={"new_worker": self.worker_id},
-                        ),
+                    run_id, thread_id, tenant_id, kind, run_input, attempt = row
+                    await cur.execute(
+                        """
+                        SELECT created_by, creator_roles, release_version, checkpoint_compat,
+                               workflow_name
+                          FROM app_threads
+                         WHERE thread_id = %s
+                        """,
+                        (thread_id,),
                     )
-            await conn.commit()
+                    t_row = await cur.fetchone()
+                    assert t_row is not None
+                    created_by, creator_roles, release_version, thread_compat, workflow_name = (
+                        t_row
+                    )
+
+                    if attempt > 1:
+                        await write_audit_event(
+                            conn,
+                            AuditEvent(
+                                tenant_id=tenant_id,
+                                actor_id=created_by,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                workflow_version=release_version,
+                                event_type="run_reclaimed",
+                                decision="allow",
+                                step_or_op_key=f"reclaim:{run_id}",
+                                attempt=attempt,
+                                details={"new_worker": self.worker_id},
+                            ),
+                        )
+                await conn.commit()
+            except psycopg.errors.UniqueViolation:
+                await conn.rollback()
+                return None
 
         return {
             "run_id": run_id,
@@ -434,14 +453,19 @@ class RunWorker:
                 if cur.rowcount == 0:
                     await conn.rollback()
                     return False
-                # If a follow-up run is already queued for this thread (enqueue/interrupt),
-                # keep the thread `running` so the queued run can be claimed next.
-                await cur.execute(
-                    "SELECT 1 FROM runs WHERE thread_id = %s AND status = 'queued' LIMIT 1",
-                    (thread_id,),
-                )
-                has_queued_followup = (await cur.fetchone()) is not None
-                effective_thread_status = "running" if has_queued_followup else thread_status
+                # If a terminal run finishes while a follow-up run is queued for this thread
+                # (enqueue/interrupt), keep the thread `running` so the queued run can be claimed.
+                # Never overwrite `awaiting_approval`, or a queued follow-up would strand the HITL
+                # approval and hide it from `GET /v1/approvals`.
+                if thread_status == "awaiting_approval":
+                    effective_thread_status = "awaiting_approval"
+                else:
+                    await cur.execute(
+                        "SELECT 1 FROM runs WHERE thread_id = %s AND status = 'queued' LIMIT 1",
+                        (thread_id,),
+                    )
+                    has_queued_followup = (await cur.fetchone()) is not None
+                    effective_thread_status = "running" if has_queued_followup else thread_status
                 await cur.execute(
                     "UPDATE app_threads SET status = %s, updated_at = now() WHERE thread_id = %s",
                     (effective_thread_status, thread_id),
