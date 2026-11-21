@@ -242,3 +242,25 @@ def test_m0_deterministic_mocks() -> None:
     )
     assert llm.invoke("hi").content == "turn-1"
     assert llm.invoke("hi again").content == "turn-2"
+
+
+def test_release_fingerprint_matches_compiled_graph_topology() -> None:
+    """Ensure GOVERNED_GRAPH_NODES & GOVERNED_GRAPH_EDGES never drift from compiled graphs."""
+    from core.workflow_catalog import GOVERNED_GRAPH_EDGES, GOVERNED_GRAPH_NODES
+    from workflows.incident_desk.graph import build_incident_desk_graph
+    from workflows.refund_ops.graph import build_refund_ops_graph
+
+    expected_nodes = set(GOVERNED_GRAPH_NODES)
+    expected_edges = {
+        (
+            "__start__" if src == "START" else src,
+            "__end__" if dst == "END" else dst,
+        )
+        for src, dst in GOVERNED_GRAPH_EDGES
+    }
+    for builder in (build_incident_desk_graph, build_refund_ops_graph):
+        drawable = builder().get_graph()
+        actual_nodes = {n for n in drawable.nodes if n not in {"__start__", "__end__"}}
+        actual_edges = {(e.source, e.target) for e in drawable.edges}
+        assert actual_nodes == expected_nodes
+        assert actual_edges == expected_edges

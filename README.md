@@ -34,6 +34,8 @@ See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete bu
   - `/v1/dev/token` is disabled by default in code (`ENABLE_DEV_TOKENS=false`) and explicitly opted into in `.env.example` for local demos; replace with a real IdP before any shared deployment.
   - Redis is best-effort only: during a Redis outage, SSE wake-ups degrade to Postgres polling and the per-tenant rate limiter deliberately fails open to preserve availability.
   - API and worker share a single `app_rw` DB role in local dev; production deployments should separate API (no RLS bypass) from worker queue roles and add RLS on LangGraph checkpoint/store tables.
+  - Write reconciliation covers cancellation and tool-level write timeouts; whole-run deadlines and exhausted-attempt failures do not currently run post-mortem reconciliation, and cancelling a run after `operation_id` is minted (before any write) records `outcome_unknown`.
+  - In `MODEL_MODE=mock`, injection drills key off request text rather than live model parsing of poisoned runbooks, cross-thread `AsyncPostgresStore` memories are persisted/recalled in state (not yet injected into LLM prompts), and per-tenant LLM rate limits/budgets are local stubs.
   - Real-provider LLM planning quality and broader PII detectors (SSNs, JWTs, unseparated phone numbers) are scoped outside this \$0 local reference.
 
 ---
