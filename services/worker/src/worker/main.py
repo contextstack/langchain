@@ -309,6 +309,13 @@ class RunWorker:
                                )
                            AND cancel_requested = false
                            AND attempt < max_attempts
+                           AND NOT EXISTS (
+                               SELECT 1
+                                 FROM runs r2
+                                WHERE r2.thread_id = runs.thread_id
+                                  AND r2.status = 'running'
+                                  AND r2.run_id <> runs.run_id
+                           )
                          ORDER BY created_at ASC
                          LIMIT 1
                            FOR UPDATE SKIP LOCKED
@@ -415,9 +422,17 @@ class RunWorker:
                 if cur.rowcount == 0:
                     await conn.rollback()
                     return False
+                # If a follow-up run is already queued for this thread (enqueue/interrupt),
+                # keep the thread `running` so the queued run can be claimed next.
+                await cur.execute(
+                    "SELECT 1 FROM runs WHERE thread_id = %s AND status = 'queued' LIMIT 1",
+                    (thread_id,),
+                )
+                has_queued_followup = (await cur.fetchone()) is not None
+                effective_thread_status = "running" if has_queued_followup else thread_status
                 await cur.execute(
                     "UPDATE app_threads SET status = %s, updated_at = now() WHERE thread_id = %s",
-                    (thread_status, thread_id),
+                    (effective_thread_status, thread_id),
                 )
             await conn.commit()
         return True
@@ -551,8 +566,8 @@ class RunWorker:
                 has_interrupts = bool(snap and snap.interrupts)
                 has_next = bool(snap and snap.next)
 
-                # Decide continuation path (spec §8.2)
-                if has_interrupts and kind == "start":
+                # Decide continuation path (spec §8.2 + v2.3 enqueue/interrupt)
+                if attempt > 1 and has_interrupts and kind == "start":
                     committed = await self._fenced_finalize(
                         pool,
                         run_id=run_id,
@@ -567,7 +582,7 @@ class RunWorker:
                         )
                     return
 
-                if not has_next and has_values and not has_interrupts:
+                if attempt > 1 and not has_next and has_values and not has_interrupts:
                     vals = snap.values if snap else {}
                     run_st, thread_st, err_cat, final_st = _classify_terminal_state(vals)
                     committed = await self._fenced_finalize(
@@ -592,7 +607,7 @@ class RunWorker:
                 graph_input: Any
                 if has_interrupts and kind == "resume":
                     graph_input = Command(resume=run_input)
-                elif has_values and has_next:
+                elif attempt > 1 and has_values and has_next:
                     graph_input = None  # Crash recovery from last checkpoint
                 else:
                     graph_input = run_input

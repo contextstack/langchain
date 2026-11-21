@@ -47,8 +47,9 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_runs_one_active_per_thread
-    ON runs (thread_id) WHERE status IN ('queued', 'running');
+DROP INDEX IF EXISTS uq_runs_one_active_per_thread;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_runs_one_running_per_thread
+    ON runs (thread_id) WHERE status = 'running';
 CREATE INDEX IF NOT EXISTS idx_runs_claimable
     ON runs (status, lease_expires_at);
 

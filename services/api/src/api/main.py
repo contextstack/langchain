@@ -15,7 +15,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-import psycopg
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -65,6 +64,7 @@ class CreateThreadRequest(BaseModel):
 
 class StartRunRequest(BaseModel):
     request_text: str = Field(min_length=1)
+    multitask_strategy: Literal["reject", "enqueue", "interrupt"] = "reject"
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -250,6 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rds: aioredis.Redis = request.app.state.redis
         run_id = f"run_{uuid.uuid4().hex[:16]}"
 
+        cancelled_run_ids: list[str] = []
         async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             await set_tenant_context(conn, caller.tenant_id)
             await cur.execute(
@@ -260,40 +261,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if row is None or row[0] != caller.tenant_id:
                 raise HTTPException(status_code=404, detail="Thread not found")
 
-            # v1.3: 1 thread = 1 incident/change request; only `idle` accepts a start run
-            if row[1] != "idle":
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Thread is '{row[1]}'; only 'idle' threads accept a start run",
-                )
-
-            try:
+            thread_status = row[1]
+            if thread_status == "idle" or (
+                thread_status == "running" and body.multitask_strategy == "enqueue"
+            ):
+                pass
+            elif thread_status == "running" and body.multitask_strategy == "interrupt":
+                # Cancel any waiting queued runs immediately; signal active running run to cancel
                 await cur.execute(
                     """
-                    INSERT INTO runs (run_id, thread_id, tenant_id, kind, input, status)
-                    VALUES (%s, %s, %s, 'start', %s::jsonb, 'queued')
+                    UPDATE runs
+                       SET status = 'cancelled', cancel_requested = true, updated_at = now()
+                     WHERE thread_id = %s AND status = 'queued'
                     """,
-                    (
-                        run_id,
-                        thread_id,
-                        caller.tenant_id,
-                        json.dumps({"request_text": body.request_text}),
-                    ),
+                    (thread_id,),
                 )
-            except psycopg.errors.UniqueViolation as exc:
+                await cur.execute(
+                    """
+                    UPDATE runs
+                       SET cancel_requested = true, updated_at = now()
+                     WHERE thread_id = %s AND status = 'running'
+                    RETURNING run_id
+                    """,
+                    (thread_id,),
+                )
+                cancelled_run_ids = [r[0] for r in await cur.fetchall()]
+            else:
                 raise HTTPException(
                     status_code=409,
-                    detail="Thread already has an active run",
-                ) from exc
+                    detail=(
+                        f"Thread is '{thread_status}'; "
+                        f"multitask_strategy='{body.multitask_strategy}' rejected start run"
+                    ),
+                )
 
+            await cur.execute(
+                """
+                INSERT INTO runs (run_id, thread_id, tenant_id, kind, input, status)
+                VALUES (%s, %s, %s, 'start', %s::jsonb, 'queued')
+                """,
+                (
+                    run_id,
+                    thread_id,
+                    caller.tenant_id,
+                    json.dumps({"request_text": body.request_text}),
+                ),
+            )
             await cur.execute(
                 "UPDATE app_threads SET status = 'running', updated_at = now() "
                 "WHERE thread_id = %s",
                 (thread_id,),
             )
 
+        for cid in cancelled_run_ids:
+            await rds.publish(CANCEL_CHANNEL, cid)
         await rds.publish(WAKEUP_CHANNEL, run_id)
-        return {"run_id": run_id, "thread_id": thread_id, "status": "queued"}
+        return {
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "status": "queued",
+            "multitask_strategy": body.multitask_strategy,
+        }
 
     @app.get("/v1/runs/{run_id}")
     async def get_run(
