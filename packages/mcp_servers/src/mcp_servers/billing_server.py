@@ -7,12 +7,12 @@ from typing import Any
 from fastmcp import FastMCP
 
 from core.config import get_settings
-from mcp_servers.auth_middleware import require_mcp_claims
-from mcp_servers.domain_store import InMemoryDomainStore, PostgresDomainStore
+from mcp_servers.auth_middleware import require_approved_write_claims, require_mcp_claims
+from mcp_servers.domain_store import DomainStore, PostgresDomainStore
 
 
 def create_billing_server(
-    store: PostgresDomainStore | InMemoryDomainStore | None = None,
+    store: DomainStore | None = None,
     *,
     mcp_secret: str | None = None,
 ) -> FastMCP:
@@ -45,15 +45,15 @@ def create_billing_server(
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Issue an idempotent customer refund (requires approved write token)."""
-        claims = require_mcp_claims(secret=mcp_secret)
-        if not claims.approved_by:
-            raise PermissionError("Write MCP call requires an approved_by claim in token")
+        claims = require_approved_write_claims(
+            idempotency_key=idempotency_key, secret=mcp_secret
+        )
         return await domain.issue_refund(
             tenant_id=claims.tenant_id,
             account_id=account_id,
             amount_cents=amount_cents,
             reason=reason,
-            operation_id=idempotency_key,
+            operation_id=claims.operation_id or idempotency_key,
         )
 
     return mcp

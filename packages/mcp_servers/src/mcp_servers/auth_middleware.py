@@ -28,3 +28,19 @@ def require_mcp_claims(*, secret: str | None = None) -> MCPTokenClaims:
     token = extract_bearer_token(headers)
     signing_secret = secret or get_settings().mcp_token_secret
     return verify_mcp_token(token, secret=signing_secret)
+
+
+def require_approved_write_claims(
+    *,
+    idempotency_key: str,
+    secret: str | None = None,
+) -> MCPTokenClaims:
+    """Verify an MCP write request carries approved_by and a matching signed operation_id."""
+    claims = require_mcp_claims(secret=secret)
+    if not claims.approved_by:
+        raise PermissionError("Write MCP call requires an approved_by claim in token")
+    if not claims.operation_id or claims.operation_id != idempotency_key:
+        raise PermissionError(
+            "Write MCP call idempotency_key must match signed operation_id claim"
+        )
+    return claims

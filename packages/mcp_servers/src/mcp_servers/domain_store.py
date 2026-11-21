@@ -1,10 +1,11 @@
-"""Domain store for Mock Infra & Mock Ticketing with transactional idempotency (spec §3.3)."""
+"""Domain store for Mock Infra, Ticketing & Billing with transactional idempotency (spec §3.3)."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 import psycopg
 
@@ -23,6 +24,54 @@ class ResourceNotFoundError(LookupError):
 def compute_request_hash(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class DomainStore(Protocol):
+    """Unified contract honored by both InMemoryDomainStore and PostgresDomainStore."""
+
+    async def get_service_status(self, *, tenant_id: str, service_name: str) -> dict[str, Any]: ...
+
+    async def list_recent_deploys(
+        self, *, tenant_id: str, service_name: str
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_operation_status(
+        self, *, tenant_id: str, operation_id: str
+    ) -> dict[str, Any]: ...
+
+    async def execute_service_change(
+        self,
+        *,
+        tenant_id: str,
+        service_name: str,
+        action: str,
+        operation_id: str,
+        target_version: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def get_ticket(self, *, tenant_id: str, ticket_id: str) -> dict[str, Any]: ...
+
+    async def update_ticket(
+        self,
+        *,
+        tenant_id: str,
+        ticket_id: str,
+        status: str,
+        note: str,
+        operation_id: str,
+    ) -> dict[str, Any]: ...
+
+    async def get_account(self, *, tenant_id: str, account_id: str) -> dict[str, Any]: ...
+
+    async def issue_refund(
+        self,
+        *,
+        tenant_id: str,
+        account_id: str,
+        amount_cents: int,
+        reason: str,
+        operation_id: str,
+    ) -> dict[str, Any]: ...
 
 
 class InMemoryDomainStore:
@@ -61,6 +110,18 @@ class InMemoryDomainStore:
             for a in SEED_ACCOUNTS
         }
         self.operations: dict[str, dict[str, Any]] = {}
+
+    def _check_existing_op(
+        self, *, operation_id: str, tenant_id: str, req_hash: str
+    ) -> dict[str, Any] | None:
+        existing = self.operations.get(operation_id)
+        if existing is None:
+            return None
+        if existing["tenant_id"] != tenant_id or existing["request_hash"] != req_hash:
+            raise IdempotencyConflictError(
+                f"operation_id '{operation_id}' already used with a different payload"
+            )
+        return {**existing["result_payload"], "deduplicated": True}
 
     async def get_service_status(self, *, tenant_id: str, service_name: str) -> dict[str, Any]:
         svc = self.services.get((tenant_id, service_name))
@@ -112,13 +173,11 @@ class InMemoryDomainStore:
                 "target_version": target_version,
             }
         )
-        existing = self.operations.get(operation_id)
-        if existing is not None:
-            if existing["tenant_id"] != tenant_id or existing["request_hash"] != req_hash:
-                raise IdempotencyConflictError(
-                    f"operation_id '{operation_id}' already used with a different payload"
-                )
-            return {**existing["result_payload"], "deduplicated": True}
+        dedup = self._check_existing_op(
+            operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
+        )
+        if dedup is not None:
+            return dedup
 
         svc = self.services.get((tenant_id, service_name))
         if svc is None:
@@ -126,8 +185,7 @@ class InMemoryDomainStore:
 
         if action == "rollback" and target_version:
             svc["current_version"] = target_version
-            svc["status"] = "healthy"
-        elif action in {"restart", "scale_up"}:
+        if action in {"rollback", "restart", "scale_up"}:
             svc["status"] = "healthy"
 
         result_payload = {
@@ -175,13 +233,11 @@ class InMemoryDomainStore:
                 "note": note,
             }
         )
-        existing = self.operations.get(operation_id)
-        if existing is not None:
-            if existing["tenant_id"] != tenant_id or existing["request_hash"] != req_hash:
-                raise IdempotencyConflictError(
-                    f"operation_id '{operation_id}' already used with a different payload"
-                )
-            return {**existing["result_payload"], "deduplicated": True}
+        dedup = self._check_existing_op(
+            operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
+        )
+        if dedup is not None:
+            return dedup
 
         ticket = self.tickets.get((tenant_id, ticket_id))
         if ticket is None:
@@ -223,6 +279,8 @@ class InMemoryDomainStore:
         reason: str,
         operation_id: str,
     ) -> dict[str, Any]:
+        if amount_cents <= 0:
+            raise ValueError("Refund amount must be positive")
         req_hash = compute_request_hash(
             {
                 "tenant_id": tenant_id,
@@ -233,19 +291,15 @@ class InMemoryDomainStore:
                 "reason": reason,
             }
         )
-        existing = self.operations.get(operation_id)
-        if existing is not None:
-            if existing["tenant_id"] != tenant_id or existing["request_hash"] != req_hash:
-                raise IdempotencyConflictError(
-                    f"operation_id '{operation_id}' already used with a different payload"
-                )
-            return {**existing["result_payload"], "deduplicated": True}
+        dedup = self._check_existing_op(
+            operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
+        )
+        if dedup is not None:
+            return dedup
 
         acct = self.accounts.get((tenant_id, account_id))
         if acct is None:
             raise ResourceNotFoundError(f"Account '{account_id}' not found")
-        if amount_cents <= 0:
-            raise ValueError("Refund amount must be positive")
         if acct["balance_cents"] < amount_cents:
             raise ValueError(
                 f"Insufficient balance on account '{account_id}': "
@@ -279,6 +333,97 @@ class PostgresDomainStore:
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
+
+    async def _lookup_existing_op(
+        self,
+        cur: psycopg.AsyncCursor[Any],
+        *,
+        operation_id: str,
+        tenant_id: str,
+        req_hash: str,
+    ) -> dict[str, Any] | None:
+        await cur.execute(
+            """
+            SELECT tenant_id, request_hash, result_payload
+              FROM mock_operations
+             WHERE operation_id = %s
+               FOR UPDATE
+            """,
+            (operation_id,),
+        )
+        existing = await cur.fetchone()
+        if existing is None:
+            return None
+        if existing[0] != tenant_id or existing[1] != req_hash:
+            raise IdempotencyConflictError(
+                f"operation_id '{operation_id}' already used with different payload"
+            )
+        payload = existing[2] if isinstance(existing[2], dict) else json.loads(existing[2])
+        return {**payload, "deduplicated": True}
+
+    async def _run_idempotent_tx(
+        self,
+        *,
+        tenant_id: str,
+        operation_id: str,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+        req_hash: str,
+        mutate: Callable[[psycopg.AsyncCursor[Any]], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Run a tenant-scoped mutation + mock_operations insert atomically.
+
+        Handles simultaneous retries racing on the same `operation_id` by catching
+        `UniqueViolation` after rollback and returning the committed deduplicated result.
+        """
+        try:
+            async with (
+                await psycopg.AsyncConnection.connect(self._dsn) as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
+                await set_tenant_context(conn, tenant_id)
+                dedup = await self._lookup_existing_op(
+                    cur, operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
+                )
+                if dedup is not None:
+                    return dedup
+
+                result_payload = await mutate(cur)
+                await cur.execute(
+                    """
+                    INSERT INTO mock_operations
+                        (operation_id, tenant_id, resource_type, resource_id, action,
+                         request_hash, status, result_payload)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'succeeded', %s::jsonb)
+                    """,
+                    (
+                        operation_id,
+                        tenant_id,
+                        resource_type,
+                        resource_id,
+                        action,
+                        req_hash,
+                        json.dumps(result_payload),
+                    ),
+                )
+                return result_payload
+        except psycopg.errors.UniqueViolation as exc:
+            async with (
+                await psycopg.AsyncConnection.connect(self._dsn) as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
+                await set_tenant_context(conn, tenant_id)
+                dedup = await self._lookup_existing_op(
+                    cur, operation_id=operation_id, tenant_id=tenant_id, req_hash=req_hash
+                )
+                if dedup is not None:
+                    return dedup
+            raise IdempotencyConflictError(
+                f"operation_id '{operation_id}' already used by another tenant"
+            ) from exc
 
     async def get_service_status(self, *, tenant_id: str, service_name: str) -> dict[str, Any]:
         async with (
@@ -364,34 +509,8 @@ class PostgresDomainStore:
                 "target_version": target_version,
             }
         )
-        async with (
-            await psycopg.AsyncConnection.connect(self._dsn) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
-            await set_tenant_context(conn, tenant_id)
-            await cur.execute(
-                """
-                SELECT tenant_id, request_hash, result_payload
-                  FROM mock_operations
-                 WHERE operation_id = %s
-                   FOR UPDATE
-                """,
-                (operation_id,),
-            )
-            existing = await cur.fetchone()
-            if existing is not None:
-                if existing[0] != tenant_id or existing[1] != req_hash:
-                    raise IdempotencyConflictError(
-                        f"operation_id '{operation_id}' already used with different payload"
-                    )
-                payload = (
-                    existing[2]
-                    if isinstance(existing[2], dict)
-                    else json.loads(existing[2])
-                )
-                return {**payload, "deduplicated": True}
 
+        async def _mutate(cur: psycopg.AsyncCursor[Any]) -> dict[str, Any]:
             await cur.execute(
                 """
                 SELECT current_version, status
@@ -411,7 +530,6 @@ class PostgresDomainStore:
             new_status = (
                 "healthy" if action in {"rollback", "restart", "scale_up"} else svc[1]
             )
-
             await cur.execute(
                 """
                 UPDATE mock_services
@@ -420,7 +538,7 @@ class PostgresDomainStore:
                 """,
                 (new_version, new_status, tenant_id, service_name),
             )
-            result_payload = {
+            return {
                 "operation_id": operation_id,
                 "service_name": service_name,
                 "action": action,
@@ -428,23 +546,16 @@ class PostgresDomainStore:
                 "status": new_status,
                 "deduplicated": False,
             }
-            await cur.execute(
-                """
-                INSERT INTO mock_operations
-                    (operation_id, tenant_id, resource_type, resource_id, action,
-                     request_hash, status, result_payload)
-                VALUES (%s, %s, 'service', %s, %s, %s, 'succeeded', %s::jsonb)
-                """,
-                (
-                    operation_id,
-                    tenant_id,
-                    service_name,
-                    action,
-                    req_hash,
-                    json.dumps(result_payload),
-                ),
-            )
-            return result_payload
+
+        return await self._run_idempotent_tx(
+            tenant_id=tenant_id,
+            operation_id=operation_id,
+            resource_type="service",
+            resource_id=service_name,
+            action=action,
+            req_hash=req_hash,
+            mutate=_mutate,
+        )
 
     async def get_ticket(self, *, tenant_id: str, ticket_id: str) -> dict[str, Any]:
         async with (
@@ -493,34 +604,8 @@ class PostgresDomainStore:
                 "note": note,
             }
         )
-        async with (
-            await psycopg.AsyncConnection.connect(self._dsn) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
-            await set_tenant_context(conn, tenant_id)
-            await cur.execute(
-                """
-                SELECT tenant_id, request_hash, result_payload
-                  FROM mock_operations
-                 WHERE operation_id = %s
-                   FOR UPDATE
-                """,
-                (operation_id,),
-            )
-            existing = await cur.fetchone()
-            if existing is not None:
-                if existing[0] != tenant_id or existing[1] != req_hash:
-                    raise IdempotencyConflictError(
-                        f"operation_id '{operation_id}' already used with different payload"
-                    )
-                payload = (
-                    existing[2]
-                    if isinstance(existing[2], dict)
-                    else json.loads(existing[2])
-                )
-                return {**payload, "deduplicated": True}
 
+        async def _mutate(cur: psycopg.AsyncCursor[Any]) -> dict[str, Any]:
             await cur.execute(
                 """
                 SELECT notes
@@ -533,7 +618,6 @@ class PostgresDomainStore:
             row = await cur.fetchone()
             if row is None:
                 raise ResourceNotFoundError(f"Ticket '{ticket_id}' not found")
-
             notes = row[0] if isinstance(row[0], list) else json.loads(row[0])
             notes.append({"text": note, "operation_id": operation_id})
             await cur.execute(
@@ -544,29 +628,23 @@ class PostgresDomainStore:
                 """,
                 (status, json.dumps(notes), tenant_id, ticket_id),
             )
-            result_payload = {
+            return {
                 "operation_id": operation_id,
                 "ticket_id": ticket_id,
                 "status": status,
                 "notes_count": len(notes),
                 "deduplicated": False,
             }
-            await cur.execute(
-                """
-                INSERT INTO mock_operations
-                    (operation_id, tenant_id, resource_type, resource_id, action,
-                     request_hash, status, result_payload)
-                VALUES (%s, %s, 'ticket', %s, 'update_ticket', %s, 'succeeded', %s::jsonb)
-                """,
-                (
-                    operation_id,
-                    tenant_id,
-                    ticket_id,
-                    req_hash,
-                    json.dumps(result_payload),
-                ),
-            )
-            return result_payload
+
+        return await self._run_idempotent_tx(
+            tenant_id=tenant_id,
+            operation_id=operation_id,
+            resource_type="ticket",
+            resource_id=ticket_id,
+            action="update_ticket",
+            req_hash=req_hash,
+            mutate=_mutate,
+        )
 
     async def get_account(self, *, tenant_id: str, account_id: str) -> dict[str, Any]:
         async with (
@@ -616,34 +694,8 @@ class PostgresDomainStore:
                 "reason": reason,
             }
         )
-        async with (
-            await psycopg.AsyncConnection.connect(self._dsn) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
-            await set_tenant_context(conn, tenant_id)
-            await cur.execute(
-                """
-                SELECT tenant_id, request_hash, result_payload
-                  FROM mock_operations
-                 WHERE operation_id = %s
-                   FOR UPDATE
-                """,
-                (operation_id,),
-            )
-            existing = await cur.fetchone()
-            if existing is not None:
-                if existing[0] != tenant_id or existing[1] != req_hash:
-                    raise IdempotencyConflictError(
-                        f"operation_id '{operation_id}' already used with different payload"
-                    )
-                payload = (
-                    existing[2]
-                    if isinstance(existing[2], dict)
-                    else json.loads(existing[2])
-                )
-                return {**payload, "deduplicated": True}
 
+        async def _mutate(cur: psycopg.AsyncCursor[Any]) -> dict[str, Any]:
             await cur.execute(
                 """
                 SELECT balance_cents, status
@@ -662,7 +714,6 @@ class PostgresDomainStore:
                     f"Insufficient balance on account '{account_id}': "
                     f"{current_balance} < {amount_cents}"
                 )
-
             new_balance = current_balance - amount_cents
             await cur.execute(
                 """
@@ -672,7 +723,7 @@ class PostgresDomainStore:
                 """,
                 (new_balance, tenant_id, account_id),
             )
-            result_payload = {
+            return {
                 "operation_id": operation_id,
                 "account_id": account_id,
                 "amount_cents": amount_cents,
@@ -680,19 +731,13 @@ class PostgresDomainStore:
                 "reason": reason,
                 "deduplicated": False,
             }
-            await cur.execute(
-                """
-                INSERT INTO mock_operations
-                    (operation_id, tenant_id, resource_type, resource_id, action,
-                     request_hash, status, result_payload)
-                VALUES (%s, %s, 'account', %s, 'issue_refund', %s, 'succeeded', %s::jsonb)
-                """,
-                (
-                    operation_id,
-                    tenant_id,
-                    account_id,
-                    req_hash,
-                    json.dumps(result_payload),
-                ),
-            )
-            return result_payload
+
+        return await self._run_idempotent_tx(
+            tenant_id=tenant_id,
+            operation_id=operation_id,
+            resource_type="account",
+            resource_id=account_id,
+            action="issue_refund",
+            req_hash=req_hash,
+            mutate=_mutate,
+        )
