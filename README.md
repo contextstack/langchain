@@ -1,8 +1,16 @@
 # ContextStack Enterprise LangChain Reference Stack
 
-A 100% Python, 100% open-source reference monorepo demonstrating an **enterprise-grade agent platform** built "the LangChain stack way" — using **LangChain v1**, **LangGraph**, native **MCP (`langchain[mcp]` + FastMCP)**, **PostgreSQL (`pgvector` + checkpoints + store)**, **Redis**, **OpenTelemetry**, and self-hosted **Langfuse**.
+A 100% Python, 100% open-source reference monorepo demonstrating an **enterprise-grade agent platform** built the LangChain stack way - using **LangChain v1**, **LangGraph**, native **MCP (`langchain[mcp]` + FastMCP)**, **PostgreSQL (`pgvector` + checkpoints + store)**, **Redis**, **OpenTelemetry**, and self-hosted **Langfuse**.
 
-Everything in v1 runs locally at **\$0 in licences**. All CI tests, offline evaluations, and failure drills run deterministically against mock models with zero API spend.
+Everything so far runs locally at **\$0 in licences**. All CI tests, offline evaluations, and failure drills run deterministically against mock models with zero API spend.
+
+---
+
+## A bit more information about this project
+
+- This is my latest experiment in using the LangChain stack, but all open source. So perhaps "enterprise" is the right word, or maybe it is ;)
+- Traditionally, I've found LangChain a bit inflexible for how I want to run my own software factory / personal agent / anything factory. You can see my latest public release of that here: https://github.com/contextstack/contextstack if you are curious.
+- I've used it on a few client projects, but it's been a minute, so I'm refamiliarizing myself with it via this project.
 
 ---
 
@@ -10,7 +18,7 @@ Everything in v1 runs locally at **\$0 in licences**. All CI tests, offline eval
 
 - **Control Plane (`packages/core`):** Signed JWT auth, frozen `RunContext` (`context_schema`), deterministic `PolicyEngine` with separation of duties, workflow `release_version` + `checkpoint_compat`, and resource bounds.
 - **Execution Plane (`services/api`, `services/worker`, `packages/workflows`, `packages/mcp_servers`):**
-  - FastAPI **never** executes a graph — it authenticates, writes to PostgreSQL `runs`, and streams reconnectable SSE (`Last-Event-ID`) from Redis Streams.
+  - FastAPI **never** executes a graph - it authenticates, writes to PostgreSQL `runs`, and streams reconnectable SSE (`Last-Event-ID`) from Redis Streams.
   - A separate worker process claims runs via `FOR UPDATE SKIP LOCKED`, holds fenced leases `(lease_owner, attempt)` with heartbeats, runs LangGraph with `durability="sync"`, and automatically reclaims crashed workers' runs.
   - Flagship workflow: **IT / Ops Change-Request & Incident Desk** (`StateGraph` outer orchestrator + LangChain v1 `create_agent` with `PIIMiddleware`, `SummarizationMiddleware`, `ModelCallLimitMiddleware`, `ToolCallLimitMiddleware`, `interrupt()`/`Command(resume=...)` HITL approval, idempotent writes, and deterministic end-state verification).
 - **Evidence Plane (`packages/telemetry`, `evals/`):**
@@ -22,7 +30,7 @@ See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete bu
 
 ---
 
-## Quickstart (Core Profile — \$0, No API Keys Required)
+## Quickstart (Core Profile - \$0, No API Keys Required)
 
 ```bash
 cp .env.example .env
