@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -11,6 +12,23 @@ import psycopg
 
 from core.db import set_tenant_context
 from knowledge.fixtures import SEED_ACCOUNTS, SEED_SERVICES, SEED_TICKETS
+
+_SEMVER_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
+
+
+def normalize_service_version(version: str | None) -> str | None:
+    """Validate and canonicalize service version strings (e.g. '2.4.0' -> 'v2.4.0')."""
+    if version is None:
+        return None
+    stripped = version.strip()
+    if not stripped:
+        return None
+    match = _SEMVER_RE.match(stripped)
+    if not match:
+        raise ValueError(
+            f"Invalid target_version '{version}': expected semantic version like 'v2.4.0'"
+        )
+    return f"v{match.group(1)}"
 
 
 class IdempotencyConflictError(ValueError):
@@ -164,13 +182,14 @@ class InMemoryDomainStore:
         operation_id: str,
         target_version: str | None = None,
     ) -> dict[str, Any]:
+        canonical_version = normalize_service_version(target_version)
         req_hash = compute_request_hash(
             {
                 "tenant_id": tenant_id,
                 "resource_type": "service",
                 "resource_id": service_name,
                 "action": action,
-                "target_version": target_version,
+                "target_version": canonical_version,
             }
         )
         dedup = self._check_existing_op(
@@ -183,8 +202,8 @@ class InMemoryDomainStore:
         if svc is None:
             raise ResourceNotFoundError(f"Service '{service_name}' not found")
 
-        if action == "rollback" and target_version:
-            svc["current_version"] = target_version
+        if action == "rollback" and canonical_version:
+            svc["current_version"] = canonical_version
         if action in {"rollback", "restart", "scale_up"}:
             svc["status"] = "healthy"
 
@@ -512,13 +531,14 @@ class PostgresDomainStore:
         operation_id: str,
         target_version: str | None = None,
     ) -> dict[str, Any]:
+        canonical_version = normalize_service_version(target_version)
         req_hash = compute_request_hash(
             {
                 "tenant_id": tenant_id,
                 "resource_type": "service",
                 "resource_id": service_name,
                 "action": action,
-                "target_version": target_version,
+                "target_version": canonical_version,
             }
         )
 
@@ -537,7 +557,7 @@ class PostgresDomainStore:
                 raise ResourceNotFoundError(f"Service '{service_name}' not found")
 
             new_version = (
-                target_version if (action == "rollback" and target_version) else svc[0]
+                canonical_version if (action == "rollback" and canonical_version) else svc[0]
             )
             new_status = (
                 "healthy" if action in {"rollback", "restart", "scale_up"} else svc[1]

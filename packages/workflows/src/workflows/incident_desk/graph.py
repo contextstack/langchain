@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage
 from core.models import ChangePlan, RunbookCitation, RunContext
 from core.pii import redact_text
 from core.tool_contract import TOOL_CONTRACTS, cap_tool_output
+from mcp_servers.domain_store import normalize_service_version
 from workflows.incident_desk.version import INVESTIGATE_SYSTEM_PROMPT, RELEASE_VERSION
 from workflows.lifecycle import (
     DomainHooks,
@@ -280,7 +281,8 @@ async def _verify_end_state(
             tenant_id=ctx.tenant_id, service_name=plan.target_resource
         ),
     )
-    version_ok = svc["current_version"] == plan.target_version if plan.target_version else True
+    expected_version = normalize_service_version(plan.target_version)
+    version_ok = svc["current_version"] == expected_version if expected_version else True
     return svc["status"] == "healthy" and version_ok
 
 

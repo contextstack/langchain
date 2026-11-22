@@ -61,9 +61,10 @@ async def evaluate_triage_and_faithfulness(
     summary: str,
     cited_doc_ids: list[str],
     retrieved_runbooks: list[dict[str, Any]],
+    tool_observations: list[str] | None = None,
     settings: Settings | None = None,
 ) -> TriageJudgeResult:
-    """Score faithfulness + triage quality (1-5) against full runbook text via LLM judge."""
+    """Score faithfulness + triage quality (1-5) against runbooks and tool outputs via LLM judge."""
     cfg = settings or get_settings()
     retrieved_ids = [str(r["doc_id"]) for r in retrieved_runbooks]
     if cfg.model_mode == "mock":
@@ -78,13 +79,21 @@ async def evaluate_triage_and_faithfulness(
     runbook_excerpts = "\n\n".join(
         f"[{r['doc_id']}] {r.get('title', '')}\n{r.get('content', '')}" for r in retrieved_runbooks
     )
+    obs_block = ""
+    if tool_observations:
+        obs_lines = "\n".join(f"- {obs}" for obs in tool_observations)
+        obs_block = f"\n\nRead-Only Tool Observations:\n{obs_lines}"
     return await structured.ainvoke(
-        "Grade the IT/Ops incident plan on:\n"
-        "1. faithful (bool): Are the summary claims grounded in the cited runbook text below?\n"
+        "Grade the IT/Ops or Billing plan on:\n"
+        "1. faithful (bool): Are the summary claims grounded in the cited runbook text "
+        "and/or the read-only tool observations below? Policy and remediation rules must align "
+        "with the cited runbook; live service status, deploy versions, or account balances may "
+        "come from the tool observations.\n"
         "2. triage_score (1-5): Operational clarity and actionability.\n\n"
         f"Plan Summary: {summary}\n"
         f"Cited Doc IDs: {cited_doc_ids}\n\n"
         f"Retrieved Runbooks:\n{runbook_excerpts}"
+        f"{obs_block}"
     )
 
 

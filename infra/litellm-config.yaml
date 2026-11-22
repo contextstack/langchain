@@ -30,8 +30,8 @@ model_list:
       api_key: os.environ/OPENAI_API_KEY
   - model_name: eval-gemini
     litellm_params:
-      model: openrouter/google/gemini-2.5-flash
-      api_key: os.environ/OPENROUTER_API_KEY
+      model: gemini/gemini-4-hydrogen
+      api_key: os.environ/GEMINI_API_KEY
   - model_name: eval-openrouter-llama
     litellm_params:
       model: openrouter/meta-llama/llama-3.3-70b-instruct

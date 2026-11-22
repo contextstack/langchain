@@ -202,3 +202,36 @@ async def test_mcp_write_handlers_reject_mismatched_signed_operation_id() -> Non
         for s in srvs:
             s.should_exit = True
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_service_version_normalization_and_validation_at_write_boundary() -> None:
+    """DomainStore canonicalizes bare semver ('2.4.0' -> 'v2.4.0') and rejects invalid strings."""
+    from mcp_servers.domain_store import normalize_service_version  # noqa: PLC0415
+
+    assert normalize_service_version(None) is None
+    assert normalize_service_version("  ") is None
+    assert normalize_service_version("2.4.0") == "v2.4.0"
+    assert normalize_service_version("v2.4.0") == "v2.4.0"
+    with pytest.raises(ValueError, match="Invalid target_version"):
+        normalize_service_version("latest")
+
+    store = InMemoryDomainStore()
+    res = await store.execute_service_change(
+        tenant_id="tenant-alpha",
+        service_name="checkout-api",
+        action="rollback",
+        target_version="2.4.0",
+        operation_id="op_norm_v1",
+    )
+    assert res["current_version"] == "v2.4.0"
+    svc = await store.get_service_status(tenant_id="tenant-alpha", service_name="checkout-api")
+    assert svc["current_version"] == "v2.4.0"
+
+    with pytest.raises(ValueError, match="Invalid target_version"):
+        await store.execute_service_change(
+            tenant_id="tenant-alpha",
+            service_name="checkout-api",
+            action="rollback",
+            target_version="not-a-version",
+            operation_id="op_bad_v1",
+        )

@@ -86,6 +86,8 @@ async def test_judge_gateway_mode_and_blank_calibration_lines(
     class _FakeStructured:
         async def ainvoke(self, prompt: str) -> TriageJudgeResult:
             assert "rb-1" in prompt
+            if "Read-Only Tool Observations:" in prompt:
+                assert "get_service_status" in prompt
             return TriageJudgeResult(faithful=True, triage_score=5, rationale="ok")
 
     class _FakeModel:
@@ -99,6 +101,9 @@ async def test_judge_gateway_mode_and_blank_calibration_lines(
         summary="Roll back checkout-api",
         cited_doc_ids=["rb-1"],
         retrieved_runbooks=[{"doc_id": "rb-1", "title": "RB", "content": "Roll back"}],
+        tool_observations=[
+            'get_service_status: {"status": "degraded", "current_version": "v2.4.1"}'
+        ],
         settings=gw_settings,
     )
     assert res.faithful is True and res.triage_score == 5

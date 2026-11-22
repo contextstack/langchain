@@ -124,10 +124,28 @@ async def run_eval_suite(
             if hasattr(plan, "target_resource")
             else (plan or {}).get("target_resource")
         )
+        tool_observations: list[str] = []
+        for msg in final.get("messages", []):
+            msg_type = getattr(msg, "type", None) or (
+                msg.get("type") if isinstance(msg, dict) else None
+            )
+            msg_role = getattr(msg, "role", None) or (
+                msg.get("role") if isinstance(msg, dict) else None
+            )
+            if msg_type == "tool" or msg_role == "tool":
+                name = getattr(msg, "name", None) or (
+                    msg.get("name") if isinstance(msg, dict) else "tool"
+                )
+                content = getattr(msg, "content", None) or (
+                    msg.get("content") if isinstance(msg, dict) else ""
+                )
+                tool_observations.append(f"{name}: {content}")
+
         judge_res = await evaluate_triage_and_faithfulness(
             summary=plan_summary,
             cited_doc_ids=cited_ids,
             retrieved_runbooks=retrieved_runbooks,
+            tool_observations=tool_observations,
             settings=cfg_settings,
         )
 
