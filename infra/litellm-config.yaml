@@ -1,7 +1,7 @@
 model_list:
   - model_name: ops-primary
     litellm_params:
-      model: anthropic/claude-sonnet-4-20250514
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
   - model_name: ops-primary-fallback
     litellm_params:
@@ -19,6 +19,27 @@ model_list:
     litellm_params:
       model: openai/text-embedding-3-small
       api_key: os.environ/OPENAI_API_KEY
+  # Explicit provider aliases for multi-provider evaluation passes
+  - model_name: eval-anthropic
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: eval-openai
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: eval-gemini
+    litellm_params:
+      model: openrouter/google/gemini-2.5-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: eval-openrouter-llama
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.3-70b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: eval-openrouter-qwen
+    litellm_params:
+      model: openrouter/qwen/qwen-2.5-72b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
 
 router_settings:
   num_retries: 2

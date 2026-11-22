@@ -176,9 +176,14 @@ def run_eval(
         "--calibration",
         help="Path to hand-labeled calibration JSONL",
     ),
+    model_alias: str = typer.Option(
+        "ops-primary",
+        "--model-alias",
+        help="LiteLLM model alias to evaluate when MODEL_MODE=gateway",
+    ),
 ) -> None:
-    """Run the offline evaluation suite and exit non-zero on regression (AC-7)."""
-    report = asyncio.run(run_eval_suite(dataset, calibration))
+    """Run the offline or real-provider evaluation suite and exit non-zero on regression (AC-7)."""
+    report = asyncio.run(run_eval_suite(dataset, calibration, model_alias=model_alias))
     typer.echo(json.dumps(report, indent=2))
     if not report["passed"]:
         raise typer.Exit(code=1)

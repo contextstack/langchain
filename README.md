@@ -24,7 +24,7 @@ Everything so far runs locally at **\$0 in licences**. All CI tests, offline eva
 - **Evidence Plane (`packages/telemetry`, `evals/`):**
   - OpenTelemetry spans with mandatory PII masking → self-hosted Langfuse (with a zero-code env-var toggle to commercial LangSmith).
   - Separate, DB-enforced append-only PostgreSQL `audit_log` (role grants + trigger).
-  - Offline evaluation suite (`evals/datasets/core.jsonl`) with deterministic ground-truth evaluators and a starter 4-example calibration set (`evals/datasets/calibration.jsonl`).
+  - Offline & real-provider evaluation suite (`evals/datasets/core.jsonl`, 10 cases across `incident_desk` + `refund_ops`) with deterministic ground-truth evaluators and an 8-sample judge calibration set (`evals/datasets/calibration.jsonl`). See [docs/eval-results.md](./docs/eval-results.md) for live 5-model gateway benchmark results (Anthropic, OpenAI, Gemini, Llama 3.3, Qwen 2.5), including both passes and misses.
 
 See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete build-vs-buy breakdown against **LangSmith Platform** and **LangSmith Deployments / Agent Server**, and [docs/adr/0001-oss-control-execution-evidence-architecture.md](./docs/adr/0001-oss-control-execution-evidence-architecture.md) for the full Architecture Decision Record (ADR).
 
@@ -36,7 +36,7 @@ See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete bu
   - API and worker share a single `app_rw` DB role in local dev; production deployments should separate API (no RLS bypass) from worker queue roles and add RLS on LangGraph checkpoint/store tables.
   - Write reconciliation covers cancellation and tool-level write timeouts; whole-run deadlines and exhausted-attempt failures do not currently run post-mortem reconciliation, and cancelling a run after `operation_id` is minted (before any write) records `outcome_unknown`.
   - In `MODEL_MODE=mock`, injection drills key off request text rather than live model parsing of poisoned runbooks, cross-thread `AsyncPostgresStore` memories are persisted/recalled in state (not yet injected into LLM prompts), and per-tenant LLM rate limits/budgets are local stubs.
-  - Real-provider LLM planning quality and broader PII detectors (SSNs, JWTs, unseparated phone numbers) are scoped outside this \$0 local reference.
+  - Broader PII detectors (SSNs, JWTs, unseparated phone numbers) are scoped outside this local reference; see [docs/eval-results.md](./docs/eval-results.md) for live multi-provider LLM planning results and observed misses.
 
 ---
 

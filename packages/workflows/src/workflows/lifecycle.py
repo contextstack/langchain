@@ -68,6 +68,7 @@ class WorkflowDeps:
     audit_memory: list[AuditEvent] = field(default_factory=list)
     attempt: int = 1
     simulate_write_timeout: bool = False
+    primary_model_alias: str = "ops-primary"
 
     def get_domain_store(self) -> DomainStore:
         if self.domain_store is not None:
@@ -216,7 +217,7 @@ def build_governed_workflow_graph(
         if wf_deps.settings.model_mode == "mock":
             mock_turns = hooks.build_mock_investigate_turns(req_text, ctx, runbooks)
             chat_model = get_chat_model(
-                alias="ops-primary",
+                alias=wf_deps.primary_model_alias,
                 tenant_id=ctx.tenant_id,
                 settings=wf_deps.settings,
                 mock_responses=mock_turns,
@@ -229,7 +230,9 @@ def build_governed_workflow_graph(
             )
         else:
             chat_model = get_chat_model(
-                alias="ops-primary", tenant_id=ctx.tenant_id, settings=wf_deps.settings
+                alias=wf_deps.primary_model_alias,
+                tenant_id=ctx.tenant_id,
+                settings=wf_deps.settings,
             )
             fast_model = get_chat_model(
                 alias="ops-fast", tenant_id=ctx.tenant_id, settings=wf_deps.settings
@@ -277,7 +280,9 @@ def build_governed_workflow_graph(
             plan = hooks.deterministic_mock_plan(req_text, runbooks)
         else:
             model = get_chat_model(
-                alias="ops-primary", tenant_id=ctx.tenant_id, settings=wf_deps.settings
+                alias=wf_deps.primary_model_alias,
+                tenant_id=ctx.tenant_id,
+                settings=wf_deps.settings,
             )
             structured = model.with_structured_output(ChangePlan)
             safe_req = redact_text(req_text)

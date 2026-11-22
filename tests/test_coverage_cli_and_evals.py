@@ -68,6 +68,24 @@ def test_deterministic_evaluator_failure_branches() -> None:
     )
     assert not ok and "health=" in msg
 
+    # refund_ops account end-state branches
+    missing_acct_case = {
+        "tenant_id": "tenant-alpha",
+        "expected_final_status": "completed",
+        "expected_account": "ACC-9999",
+        "expected_balance_cents": 85_000,
+    }
+    ok, msg = eval_end_state_matches(
+        case=missing_acct_case, final_state={"final_status": "completed"}, store=store
+    )
+    assert not ok and "missing" in msg
+
+    wrong_bal_case = {**missing_acct_case, "expected_account": "ACC-1001"}
+    ok, msg = eval_end_state_matches(
+        case=wrong_bal_case, final_state={"final_status": "completed"}, store=store
+    )
+    assert not ok and "balance_cents=" in msg
+
     # eval_idempotency_preserved mismatch
     ok, msg = eval_idempotency_preserved(case=base_case, store=store)
     assert not ok and "count=0" in msg

@@ -650,9 +650,12 @@ async def test_ac7_offline_eval_regression_gate() -> None:
         Path("evals/datasets/calibration.jsonl"),
     )
     assert report["passed"] is True
-    assert report["total"] == 6
+    assert report["total"] == 10
     assert report["calibration"] is not None
-    assert report["calibration"]["agreement_rate"] == 1.0
+    # Syntactic mock rubric catches missing/invented citations (6/8 = 0.75);
+    # live LLM ops-judge in gateway mode also catches semantic contradictions (cal-06/cal-07).
+    assert report["calibration"]["samples"] == 8
+    assert report["calibration"]["agreement_rate"] >= 0.75
 
 
 def test_worker_terminal_state_classification_consistent_across_recovery() -> None:
