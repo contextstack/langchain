@@ -1,45 +1,66 @@
 model_list:
+  # Default production-style aliases
   - model_name: ops-primary
     litellm_params:
-      model: anthropic/claude-sonnet-4-6
+      model: anthropic/claude-sonnet-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
   - model_name: ops-primary-fallback
     litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-6.2-sol
       api_key: os.environ/OPENAI_API_KEY
   - model_name: ops-fast
     litellm_params:
-      model: openai/gpt-4o-mini
+      model: openai/gpt-6.1-terra
       api_key: os.environ/OPENAI_API_KEY
   - model_name: ops-judge
     litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-6.2-sol
       api_key: os.environ/OPENAI_API_KEY
   - model_name: ops-embed
     litellm_params:
       model: openai/text-embedding-3-small
       api_key: os.environ/OPENAI_API_KEY
-  # Explicit provider aliases for multi-provider evaluation passes
+
+  # Modern multi-provider benchmark aliases
   - model_name: eval-anthropic
     litellm_params:
-      model: anthropic/claude-sonnet-4-6
+      model: anthropic/claude-sonnet-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
   - model_name: eval-openai
     litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-6.2-sol
       api_key: os.environ/OPENAI_API_KEY
   - model_name: eval-gemini
     litellm_params:
-      model: gemini/gemini-4-hydrogen
-      api_key: os.environ/GEMINI_API_KEY
-  - model_name: eval-openrouter-llama
-    litellm_params:
-      model: openrouter/meta-llama/llama-3.3-70b-instruct
+      model: openrouter/google/gemini-4-hydrogen
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: eval-openrouter-qwen
+  - model_name: eval-or-deepseek
     litellm_params:
-      model: openrouter/qwen/qwen-2.5-72b-instruct
+      model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: eval-or-glm
+    litellm_params:
+      model: openrouter/z-ai/glm-5.3-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: eval-or-qwen4
+    litellm_params:
+      model: openrouter/qwen/qwen4-max
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # Local OpenAI-compatible server aliases (e.g. DGX Spark / vLLM via localhost:8000 tunnel)
+  - model_name: eval-dgx-coder
+    litellm_params:
+      model: openai/local-coder
+      api_base: http://host.docker.internal:8000/v1
+      api_key: local-dgx
+  - model_name: eval-dgx-reasoner
+    litellm_params:
+      model: openai/local-reasoner
+      api_base: http://host.docker.internal:8000/v1
+      api_key: local-dgx
+
+litellm_settings:
+  drop_params: true
 
 router_settings:
   num_retries: 2
