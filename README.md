@@ -14,6 +14,19 @@ Everything so far runs locally at **\$0 in licences**. All CI tests, offline eva
 
 ---
 
+## Verified Results
+
+All numbers below are from real runs against this repository (full tables, misses, and methodology in [docs/eval-results.md](./docs/eval-results.md)):
+
+| Verification Layer | Result | Highlights |
+|---|---|---|
+| **Automated Suite (`pytest`)** | **85/85 passed** (~96% coverage) | Real `os._exit(137)` worker-kill crash recovery, PostgreSQL connection-drop recovery, Redis-outage fallback, 3-worker contention, fail-closed RLS, live OTLP PII redaction, and MCP auth binding. |
+| **Modern Live LLM Eval (8 models × 10 cases)** | **77/80 passed (96.3%)** | **0/80 unauthorized writes**, **0/16 prompt injections executed**, **100% idempotency** across commercial (`gpt-6.2-sol`, `claude-sonnet-5-5`, `gemini-4-hydrogen`), OpenRouter OSS (`qwen4-max`, `glm-5.3-flash`, `deepseek-v4.1-flash`), and **local on-prem DGX Spark** (`Qwen3-Coder-Next-FP8`, `Nemotron-Super-120B`). |
+| **Local On-Prem DGX Spark Parity** | **10/10 in 10.97s/case** | `Qwen3-Coder-Next-FP8` running locally behind LiteLLM Proxy matched commercial flagships on safety and end-state while running faster per case than Claude Sonnet 5.5 and Gemini 4 Hydrogen at **\$0 external API spend**. |
+| **Honest Misses Caught & Documented** | **4 real-world lessons** | `gemini-2.5-flash` over-remediating a read-only check (stopped cold by HITL `interrupt()`), `qwen-2.5-72b` dropping the `v` prefix (fixed via `normalize_service_version` at the write boundary), `gpt-6.2-sol` failing judge calibration at 4/8 vs. `gpt-4o` at 8/8 (proving why judge swaps must be gated on `calibration.jsonl`), and `Nemotron-Super-120B` hitting a 32k reasoning-token runaway. |
+
+---
+
 ## Architecture (3-Plane Separation)
 
 - **Control Plane (`packages/core`):** Signed JWT auth, frozen `RunContext` (`context_schema`), deterministic `PolicyEngine` with separation of duties, workflow `release_version` + `checkpoint_compat`, and resource bounds.
@@ -24,7 +37,7 @@ Everything so far runs locally at **\$0 in licences**. All CI tests, offline eva
 - **Evidence Plane (`packages/telemetry`, `evals/`):**
   - OpenTelemetry spans with mandatory PII masking → self-hosted Langfuse (with a zero-code env-var toggle to commercial LangSmith).
   - Separate, DB-enforced append-only PostgreSQL `audit_log` (role grants + trigger).
-  - Offline & real-provider evaluation suite (`evals/datasets/core.jsonl`, 10 cases across `incident_desk` + `refund_ops`) with deterministic ground-truth evaluators and an 8-sample judge calibration set (`evals/datasets/calibration.jsonl`). See [docs/eval-results.md](./docs/eval-results.md) for live 5-model gateway benchmark results (Anthropic, OpenAI, Gemini, Llama 3.3, Qwen 2.5), including both passes and misses.
+  - Offline & real-provider evaluation suite (`evals/datasets/core.jsonl`, 10 cases across `incident_desk` + `refund_ops`) with deterministic ground-truth evaluators and an 8-sample judge calibration set (`evals/datasets/calibration.jsonl`). See [docs/eval-results.md](./docs/eval-results.md) for live multi-provider and local DGX Spark benchmark results (160 live runs across 3 rounds), including both passes and misses.
 
 See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete build-vs-buy breakdown against **LangSmith Platform** and **LangSmith Deployments / Agent Server**, and [docs/adr/0001-oss-control-execution-evidence-architecture.md](./docs/adr/0001-oss-control-execution-evidence-architecture.md) for the full Architecture Decision Record (ADR).
 
