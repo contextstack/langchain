@@ -8,8 +8,13 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN
         CREATE ROLE app_rw LOGIN PASSWORD 'app_rw_dev_password';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'api_rw') THEN
+        CREATE ROLE api_rw LOGIN PASSWORD 'api_rw_dev_password';
+    END IF;
 END
 $$;
 
 GRANT CONNECT ON DATABASE contextstack TO app_rw;
 GRANT USAGE ON SCHEMA public TO app_rw;
+GRANT CONNECT ON DATABASE contextstack TO api_rw;
+GRANT USAGE ON SCHEMA public TO api_rw;

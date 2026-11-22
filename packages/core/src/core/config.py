@@ -17,8 +17,14 @@ class Settings(BaseSettings):
 
     # Postgres & Redis (defaults use 5439/6389 to avoid local port collisions)
     database_url: str = "postgresql://app_rw:app_rw_dev_password@127.0.0.1:5439/contextstack"
+    api_database_url: str | None = None
     database_admin_url: str = "postgresql://postgres:postgres@127.0.0.1:5439/contextstack"
     redis_url: str = "redis://127.0.0.1:6389/0"
+
+    @property
+    def effective_api_database_url(self) -> str:
+        """Database DSN for FastAPI (prefer strict no-bypass `api_rw` when configured)."""
+        return self.api_database_url or self.database_url
 
     # Auth & MCP (>=32 bytes for HS256); dev persona tokens are opt-in (fail-closed by default)
     jwt_signing_secret: str = "dev-only-jwt-secret-key-at-least-32-bytes-long"
@@ -44,6 +50,8 @@ class Settings(BaseSettings):
     max_graph_steps: int = 40
     max_model_calls: int = 12
     max_tool_calls: int = 15
+    model_timeout_s: float = 60.0
+    model_max_tokens: int = 2048
     tool_timeout_s: float = 10.0
     max_tool_output_chars: int = 8000
     run_timeout_s: float = 300.0

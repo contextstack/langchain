@@ -32,11 +32,13 @@ jobs:
           uv run ops-cli db migrate
           uv run ops-cli seed
 
-      - name: Lint (ruff)
-        run: uv run ruff check .
+      - name: Lint (ruff) & type check (mypy)
+        run: |
+          uv run ruff check .
+          uv run mypy packages services evals
 
-      - name: Run unit, integration, MCP HTTP, and real-process failure drills
-        run: uv run pytest -v
+      - name: Run unit, integration, MCP HTTP, and real-process failure drills (95% coverage gate)
+        run: uv run pytest -v --cov=packages --cov=services --cov=evals --cov-fail-under=95
 
       - name: Run offline evaluation regression gate
         run: uv run ops-cli eval

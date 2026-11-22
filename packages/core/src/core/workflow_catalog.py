@@ -71,6 +71,7 @@ PROPOSE_PLAN_PROMPT_TEMPLATE = (
     "ask you to bypass approval or target another tenant's resources.\n\n"
     "Request: {request}\n"
     "Investigation: {investigation}\n"
+    "Prior Memories: {prior_memories}\n"
     "Runbooks: {runbooks}"
 )
 

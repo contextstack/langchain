@@ -11,6 +11,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_openai import OpenAIEmbeddings
+from pydantic import SecretStr
 
 from core.config import Settings, get_settings
 from gateway.mocks import DeterministicMockEmbeddings, ScriptedMockChatModel
@@ -47,6 +48,8 @@ def get_chat_model(
         api_key=_tenant_litellm_key(tenant_id, cfg),
         rate_limiter=rate_limiter,
         temperature=0.0,
+        max_tokens=cfg.model_max_tokens,
+        timeout=cfg.model_timeout_s,
         max_retries=3,
     )
     return model
@@ -65,6 +68,6 @@ def get_embeddings(
     return OpenAIEmbeddings(
         model="ops-embed",
         base_url=cfg.litellm_url,
-        api_key=api_key,
+        api_key=SecretStr(api_key),
         check_embedding_ctx_length=False,
     )

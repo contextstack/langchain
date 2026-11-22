@@ -87,7 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
-            conninfo=cfg.database_url,
+            conninfo=cfg.effective_api_database_url,
             min_size=2,
             max_size=10,
             check=AsyncConnectionPool.check_connection,
@@ -153,6 +153,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/v1/runtime/status")
+    async def runtime_status() -> dict[str, Any]:
+        """Non-sensitive runtime posture for the Operations Console status bar."""
+        return {
+            "model_mode": cfg.model_mode,
+            "mcp_transport": cfg.mcp_transport,
+            "telemetry_backend": cfg.telemetry_backend,
+            "db_role_isolated": bool(cfg.api_database_url),
+            "workflows": sorted(WORKFLOW_CATALOG),
+        }
 
     @app.get("/")
     async def serve_demo_ui() -> FileResponse:
@@ -411,7 +422,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             while True:
                 if await request.is_disconnected():
                     break
-                entries = await rds.xread({stream_key: cursor_id}, count=20, block=1000)
+                entries: Any = await rds.xread({stream_key: cursor_id}, count=20, block=1000)
                 if entries:
                     for _, msgs in entries:
                         for msg_id, fields in msgs:

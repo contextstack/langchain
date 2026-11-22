@@ -116,6 +116,7 @@
         <option value="dana">dana@tenant-alpha [engineer, ops-approver — self-approval test]</option>
       </select>
       <span id="identityBadge" class="pill">loading...</span>
+      <span id="runtimeBadge" class="pill">runtime: loading...</span>
       <a id="langfuseLink" href="http://localhost:3000" target="_blank" rel="noreferrer">Open Langfuse UI</a>
     </div>
 
@@ -364,6 +365,20 @@
       document.getElementById("cancelBtn").addEventListener("click", cancelActiveRun);
       document.getElementById("refreshApprovalsBtn").addEventListener("click", refreshApprovals);
 
+      async function loadRuntimeStatus() {
+        const badge = document.getElementById("runtimeBadge");
+        try {
+          const res = await fetch("/v1/runtime/status");
+          if (!res.ok) return;
+          const st = await res.json();
+          badge.textContent =
+            `model=${st.model_mode} | mcp=${st.mcp_transport} | telemetry=${st.telemetry_backend}`;
+        } catch {
+          badge.textContent = "runtime: unavailable";
+        }
+      }
+
+      loadRuntimeStatus();
       switchPersona("alice");
     </script>
   </body>

@@ -159,8 +159,20 @@ CREATE TRIGGER trg_audit_log_append_only
 BEFORE UPDATE OR DELETE ON audit_log
 FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_mutation();
 
--- Role grants: app_rw has full access to operational tables, INSERT+SELECT ONLY on audit_log
-GRANT USAGE ON SCHEMA public TO app_rw;
+-- Ensure both worker/system role (app_rw) and strict API role (api_rw) exist idempotently
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_rw') THEN
+        CREATE ROLE app_rw LOGIN PASSWORD 'app_rw_dev_password';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'api_rw') THEN
+        CREATE ROLE api_rw LOGIN PASSWORD 'api_rw_dev_password';
+    END IF;
+END
+$$;
+
+-- Role grants: app_rw & api_rw have operational table access, INSERT+SELECT ONLY on audit_log
+GRANT USAGE ON SCHEMA public TO app_rw, api_rw;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     app_threads,
     runs,
@@ -170,14 +182,17 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
     mock_tickets,
     mock_accounts,
     mock_operations
-TO app_rw;
+TO app_rw, api_rw;
 
-REVOKE ALL ON audit_log FROM app_rw;
-GRANT SELECT, INSERT ON audit_log TO app_rw;
+REVOKE ALL ON audit_log FROM app_rw, api_rw;
+GRANT SELECT, INSERT ON audit_log TO app_rw, api_rw;
 
 -- Row-Level Security (RLS) defense-in-depth on all tenant-scoped tables.
--- Fail-closed by default: app_rw sees 0 rows unless `app.current_tenant` matches
--- or a system queue/seed transaction explicitly sets `app.bypass_rls = 'on'`.
+-- Fail-closed by default:
+--   * app_rw (worker/seed/MCP): sees 0 rows unless `app.current_tenant` matches
+--     or a system queue/seed transaction explicitly sets `app.bypass_rls = 'on'`.
+--   * api_rw (FastAPI serving plane): NEVER honors `app.bypass_rls`; every query
+--     must bind `app.current_tenant`.
 DO $$
 DECLARE
     tbl TEXT;
@@ -206,6 +221,17 @@ BEGIN
             'WITH CHECK ('
             '  current_setting(''app.bypass_rls'', true) = ''on'' '
             '  OR tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')'
+            ')',
+            tbl
+        );
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_api ON %I', tbl);
+        EXECUTE format(
+            'CREATE POLICY tenant_isolation_api ON %I FOR ALL TO api_rw '
+            'USING ('
+            '  tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')'
+            ') '
+            'WITH CHECK ('
+            '  tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')'
             ')',
             tbl
         );

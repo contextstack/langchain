@@ -20,7 +20,7 @@ All numbers below are from real runs against this repository (full tables, misse
 
 | Verification Layer | Result | Highlights |
 |---|---|---|
-| **Automated Suite (`pytest`)** | **85/85 passed** (~96% coverage) | Real `os._exit(137)` worker-kill crash recovery, PostgreSQL connection-drop recovery, Redis-outage fallback, 3-worker contention, fail-closed RLS, live OTLP PII redaction, and MCP auth binding. |
+| **Automated Suite (`pytest` + `mypy`)** | **89/89 passed** (>95% cov gate, 0 mypy errors) | Real `os._exit(137)` worker-kill crash recovery, PostgreSQL connection-drop recovery, Redis-outage fallback, 3-worker contention, fail-closed `api_rw` no-bypass RLS, live OTLP PII redaction, and MCP auth binding. |
 | **Modern Live LLM Eval (8 models × 10 cases)** | **77/80 passed (96.3%)** | **0/80 unauthorized writes**, **0/16 prompt injections executed**, **100% idempotency** across commercial (`gpt-6.2-sol`, `claude-sonnet-5-5`, `gemini-4-hydrogen`), OpenRouter OSS (`qwen4-max`, `glm-5.3-flash`, `deepseek-v4.1-flash`), and **local on-prem DGX Spark** (`Qwen3-Coder-Next-FP8`, `Nemotron-Super-120B`). |
 | **Local On-Prem DGX Spark Parity** | **10/10 in 10.97s/case** | `Qwen3-Coder-Next-FP8` running locally behind LiteLLM Proxy matched commercial flagships on safety and end-state while running faster per case than Claude Sonnet 5.5 and Gemini 4 Hydrogen at **\$0 external API spend**. |
 | **Honest Misses Caught & Documented** | **4 real-world lessons** | `gemini-2.5-flash` over-remediating a read-only check (stopped cold by HITL `interrupt()`), `qwen-2.5-72b` dropping the `v` prefix (fixed via `normalize_service_version` at the write boundary), `gpt-6.2-sol` failing judge calibration at 4/8 vs. `gpt-4o` at 8/8 (proving why judge swaps must be gated on `calibration.jsonl`), and `Nemotron-Super-120B` hitting a 32k reasoning-token runaway. |
@@ -46,10 +46,9 @@ See [docs/oss-vs-commercial.md](./docs/oss-vs-commercial.md) for the complete bu
 - **Known limits (local reference scope):**
   - `/v1/dev/token` is disabled by default in code (`ENABLE_DEV_TOKENS=false`) and explicitly opted into in `.env.example` for local demos; replace with a real IdP before any shared deployment.
   - Redis is best-effort only: during a Redis outage, SSE wake-ups degrade to Postgres polling and the per-tenant rate limiter deliberately fails open to preserve availability.
-  - API and worker share a single `app_rw` DB role in local dev; production deployments should separate API (no RLS bypass) from worker queue roles and add RLS on LangGraph checkpoint/store tables.
+  - `api_rw` (strict no-bypass RLS) and `app_rw` (worker queue/seed) are provisioned in Postgres and wired via `API_DATABASE_URL`; production deployments should also add RLS on LangGraph's checkpoint/store tables.
   - Write reconciliation covers cancellation and tool-level write timeouts; whole-run deadlines and exhausted-attempt failures do not currently run post-mortem reconciliation, and cancelling a run after `operation_id` is minted (before any write) records `outcome_unknown`.
-  - In `MODEL_MODE=mock`, injection drills key off request text rather than live model parsing of poisoned runbooks, cross-thread `AsyncPostgresStore` memories are persisted/recalled in state (not yet injected into LLM prompts), and per-tenant LLM rate limits/budgets are local stubs.
-  - Broader PII detectors (SSNs, JWTs, unseparated phone numbers) are scoped outside this local reference; see [docs/eval-results.md](./docs/eval-results.md) for live multi-provider LLM planning results and observed misses.
+  - In `MODEL_MODE=mock`, injection drills key off request text rather than live model parsing of poisoned runbooks, and per-tenant LLM rate limits/budgets are local stubs.
 
 ---
 

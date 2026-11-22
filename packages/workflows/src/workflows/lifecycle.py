@@ -11,7 +11,7 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from langchain.agents import create_agent
@@ -30,7 +30,7 @@ from core.audit import AuditEvent, write_audit_event
 from core.config import Settings, get_settings
 from core.db import set_tenant_context
 from core.models import ChangePlan, RunContext
-from core.pii import API_KEY_PATTERN, EMAIL_PATTERN, PHONE_PATTERN, redact_obj, redact_text
+from core.pii import PII_RULES, redact_obj, redact_text
 from core.policy import PolicyDecision, PolicyEngine
 from core.workflow_catalog import PROPOSE_PLAN_PROMPT_TEMPLATE
 from gateway.factory import get_chat_model, get_embeddings
@@ -238,27 +238,38 @@ def build_governed_workflow_graph(
                 alias="ops-fast", tenant_id=ctx.tenant_id, settings=wf_deps.settings
             )
 
+        agent_middleware: list[Any] = [
+            *[
+                PIIMiddleware(name, detector=pattern.pattern, strategy="redact")
+                for name, pattern, _ in PII_RULES
+            ],
+            SummarizationMiddleware(
+                model=fast_model,
+                trigger=("tokens", 4000),
+                keep=("messages", 10),
+            ),
+            ModelCallLimitMiddleware(run_limit=wf_deps.settings.max_model_calls),
+            ToolCallLimitMiddleware(run_limit=wf_deps.settings.max_tool_calls),
+        ]
         agent = create_agent(
             model=chat_model,
             tools=read_only_tools,
             system_prompt=hooks.investigate_system_prompt,
             context_schema=RunContext,
-            middleware=[
-                PIIMiddleware("email", detector=EMAIL_PATTERN, strategy="redact"),
-                PIIMiddleware("phone_number", detector=PHONE_PATTERN, strategy="redact"),
-                PIIMiddleware("api_key", detector=API_KEY_PATTERN, strategy="redact"),
-                SummarizationMiddleware(
-                    model=fast_model,
-                    trigger=("tokens", 4000),
-                    keep=("messages", 10),
-                ),
-                ModelCallLimitMiddleware(run_limit=wf_deps.settings.max_model_calls),
-                ToolCallLimitMiddleware(run_limit=wf_deps.settings.max_tool_calls),
-            ],
+            middleware=agent_middleware,
         )
 
+        prior_memories = state.get("prior_memories") or []
+        investigate_input = req_text
+        if prior_memories:
+            safe_mem = json.dumps(redact_obj(prior_memories))
+            investigate_input = (
+                f"{req_text}\n\n"
+                f"Prior Tenant Memories (historical reference only): {safe_mem}"
+            )
+
         agent_result = await agent.ainvoke(
-            {"messages": [{"role": "user", "content": req_text}]},
+            {"messages": [{"role": "user", "content": investigate_input}]},
             context=ctx,
         )
         last_msg = agent_result["messages"][-1]
@@ -287,11 +298,13 @@ def build_governed_workflow_graph(
             structured = model.with_structured_output(ChangePlan)
             safe_req = redact_text(req_text)
             safe_summary = redact_text(state.get("investigation_summary", ""))
+            safe_memories = redact_obj(state.get("prior_memories", []))
             safe_runbooks = redact_obj(runbooks)
             plan = await structured.ainvoke(
                 PROPOSE_PLAN_PROMPT_TEMPLATE.format(
                     request=safe_req,
                     investigation=safe_summary,
+                    prior_memories=json.dumps(safe_memories),
                     runbooks=json.dumps(safe_runbooks),
                 )
             )
@@ -314,7 +327,9 @@ def build_governed_workflow_graph(
 
         res = wf_deps.policy.evaluate_change_plan(ctx=ctx, plan=plan)
         operation_id = f"op_{uuid.uuid4().hex[:16]}"
-        audit_decision = "deny" if res.decision == PolicyDecision.DENY else "allow"
+        audit_decision: Literal["allow", "deny"] = (
+            "deny" if res.decision == PolicyDecision.DENY else "allow"
+        )
         details: dict[str, Any] = {
             "reason": res.reason,
             "action": plan.action,
@@ -577,7 +592,7 @@ def build_governed_workflow_graph(
                 operation_id=operation_id,
                 approved_by=approver_id,
             )
-            rec_decision = (
+            rec_decision: Literal["succeeded", "outcome_unknown"] = (
                 "succeeded" if reconciled.get("status") == "succeeded" else "outcome_unknown"
             )
             await _record_audit(
